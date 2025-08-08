@@ -1,33 +1,145 @@
+import os
+import sys
+
+# 在导入tkinter之前设置环境变量
+def setup_tcl_tk():
+    """设置Tcl/Tk环境变量"""
+    # 设置Tcl/Tk库路径
+    python_dir = os.path.dirname(sys.executable)
+    tcl_dir = os.path.join(python_dir, 'tcl')
+    tcl86_dir = os.path.join(tcl_dir, 'tcl8.6')
+    tk86_dir = os.path.join(tcl_dir, 'tk8.6')
+    
+    # 检查并设置TCL_LIBRARY
+    if os.path.exists(tcl86_dir):
+        os.environ['TCL_LIBRARY'] = tcl86_dir
+        print(f"设置 TCL_LIBRARY: {tcl86_dir}")
+    else:
+        print(f"警告：Tcl8.6目录不存在: {tcl86_dir}")
+    
+    # 检查并设置TK_LIBRARY
+    if os.path.exists(tk86_dir):
+        os.environ['TK_LIBRARY'] = tk86_dir
+        print(f"设置 TK_LIBRARY: {tk86_dir}")
+    else:
+        print(f"警告：Tk8.6目录不存在: {tk86_dir}")
+    
+    # 设置TCL_LIBRARY_PATH和TK_LIBRARY_PATH
+    if os.path.exists(tcl_dir):
+        os.environ['TCL_LIBRARY_PATH'] = tcl_dir
+        os.environ['TK_LIBRARY_PATH'] = tcl_dir
+        print(f"设置 TCL_LIBRARY_PATH: {tcl_dir}")
+        print(f"设置 TK_LIBRARY_PATH: {tcl_dir}")
+
+# 设置环境变量
+setup_tcl_tk()
+
+# 现在导入tkinter
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess
 import re
 import socket
 import threading
-import os
-import sys
 from datetime import datetime
 import wmi
 import win32com.client
 
+
+
+# 导入版本信息
+try:
+    from version import VERSION, BUILD_DATE, get_version_string
+except ImportError:
+    # 如果version.py不存在，使用默认值
+    VERSION = "v1.0.0"
+    BUILD_DATE = "2025-08-08"
+    def get_version_string():
+        return f"{VERSION} (构建日期: {BUILD_DATE})"
+
 class IPManager:
+    
     def __init__(self, root):
         self.root = root
         self.root.title("Windows IP地址管理器")
-        self.root.geometry("850x650")  # 调整窗口大小，确保网卡控制部分完全显示
+        self.root.geometry("945x910")  # 调整为945x910窗口
         self.root.resizable(True, True)
         
         # 设置样式
         style = ttk.Style()
         style.theme_use('clam')
         
-        # 自定义样式
-        style.configure('TButton', font=('Arial', 9))
-        style.configure('TLabel', font=('Arial', 9))
-        style.configure('TEntry', font=('Arial', 9))
-        style.configure('TCombobox', font=('Arial', 9))
-        style.configure('TLabelframe', font=('Arial', 9, 'bold'))
-        style.configure('TLabelframe.Label', font=('Arial', 9, 'bold'))
+        # 自定义样式 - 增大字体
+        style.configure('TButton', font=('Arial', 11))
+        style.configure('TLabel', font=('Arial', 11))
+        style.configure('TEntry', font=('Arial', 11))
+        style.configure('TCombobox', font=('Arial', 11))
+        style.configure('TLabelframe', font=('Arial', 11, 'bold'))
+        style.configure('TLabelframe.Label', font=('Arial', 11, 'bold'))
+        
+        # 自定义按钮样式 - 增大字体并添加悬停效果
+        # 刷新按钮 - 绿色，悬停时稍微变亮
+        style.map('Refresh.TButton', 
+                 background=[('active', '#66BB6A'), ('pressed', '#4CAF50')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Refresh.TButton', font=('Arial', 11), background='#4CAF50', foreground='white')
+        
+        # 设置静态IP - 蓝色，悬停时稍微变亮
+        style.map('StaticIP.TButton', 
+                 background=[('active', '#42A5F5'), ('pressed', '#2196F3')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('StaticIP.TButton', font=('Arial', 11), background='#2196F3', foreground='white')
+        
+        # 设置DHCP - 橙色，悬停时稍微变亮
+        style.map('DHCP.TButton', 
+                 background=[('active', '#FFB74D'), ('pressed', '#FF9800')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('DHCP.TButton', font=('Arial', 11), background='#FF9800', foreground='white')
+        
+        # 刷新信息 - 紫色，悬停时稍微变亮
+        style.map('RefreshInfo.TButton', 
+                 background=[('active', '#BA68C8'), ('pressed', '#9C27B0')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('RefreshInfo.TButton', font=('Arial', 11), background='#9C27B0', foreground='white')
+        
+        # 导出配置 - 蓝灰色，悬停时稍微变亮
+        style.map('Export.TButton', 
+                 background=[('active', '#90A4AE'), ('pressed', '#607D8B')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Export.TButton', font=('Arial', 11), background='#607D8B', foreground='white')
+        
+        # 添加IP - 绿色，悬停时稍微变亮
+        style.map('AddIP.TButton', 
+                 background=[('active', '#66BB6A'), ('pressed', '#4CAF50')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('AddIP.TButton', font=('Arial', 11), background='#4CAF50', foreground='white')
+        
+        # 清空/删除 - 红色，悬停时稍微变亮
+        style.map('Clear.TButton', 
+                 background=[('active', '#EF5350'), ('pressed', '#F44336')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Clear.TButton', font=('Arial', 11), background='#F44336', foreground='white')
+        
+        # 禁用网卡 - 深橙色，悬停时稍微变亮
+        style.map('Disable.TButton', 
+                 background=[('active', '#FF8A65'), ('pressed', '#FF5722')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Disable.TButton', font=('Arial', 11), background='#FF5722', foreground='white')
+        
+        # 启用网卡 - 绿色，悬停时稍微变亮
+        style.map('Enable.TButton', 
+                 background=[('active', '#66BB6A'), ('pressed', '#4CAF50')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Enable.TButton', font=('Arial', 11), background='#4CAF50', foreground='white')
+        
+        # 重置网络 - 粉红色，悬停时稍微变亮
+        style.map('Reset.TButton', 
+                 background=[('active', '#F06292'), ('pressed', '#E91E63')], 
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Reset.TButton', font=('Arial', 11), background='#E91E63', foreground='white')
+        
+        # 状态栏样式
+        style.configure('Status.TLabel', font=('Arial', 11), background='#E3F2FD', foreground='#1976D2')
         
         # 初始化WMI
         self.wmi = None
@@ -45,6 +157,17 @@ class IPManager:
             self.refresh_network_adapters()
         else:
             self.status_var.set("WMI初始化失败，部分功能不可用")
+    
+    def add_button_hover_effect(self, button):
+        """为按钮添加鼠标悬停效果"""
+        def on_enter(event):
+            button.configure(cursor="hand2")
+        
+        def on_leave(event):
+            button.configure(cursor="")
+        
+        button.bind("<Enter>", on_enter)
+        button.bind("<Leave>", on_leave)
         
     def setup_ui(self):
         # 创建主框架
@@ -59,30 +182,47 @@ class IPManager:
         
         # 标题
         title_label = ttk.Label(main_frame, text="Windows IP地址管理器", 
-                               font=("Arial", 14, "bold"))
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 10))
+                               font=("Arial", 18, "bold"))
+        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 5))
         
-        # 网络适配器选择
-        ttk.Label(main_frame, text="网络适配器:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        # 版本号（小字体，灰色）
+        version_text = f"版本: {get_version_string()}"
+        version_label = ttk.Label(main_frame, text=version_text, 
+                                 font=("Arial", 11), foreground="gray")
+        version_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
+        
+        # 网络适配器选择框架
+        adapter_frame = ttk.Frame(main_frame)
+        adapter_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=3)
+        adapter_frame.columnconfigure(1, weight=1)
+        
+        # 网络适配器标签
+        adapter_label = ttk.Label(adapter_frame, text="网络适配器:")
+        adapter_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        
+        # 网络适配器下拉框
         self.adapter_var = tk.StringVar()
-        self.adapter_combo = ttk.Combobox(main_frame, textvariable=self.adapter_var, 
-                                         state="readonly", width=35)
-        self.adapter_combo.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=3, padx=(5, 0))
+        self.adapter_combo = ttk.Combobox(adapter_frame, textvariable=self.adapter_var, 
+                                         state="readonly", width=80)  # 增加宽度
+        self.adapter_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 5))
         self.adapter_combo.bind('<<ComboboxSelected>>', self.on_adapter_selected)
         
-        refresh_btn = ttk.Button(main_frame, text="刷新", command=self.refresh_network_adapters, width=8)
-        refresh_btn.grid(row=1, column=2, padx=(5, 0), pady=3)
+        # 刷新按钮
+        refresh_btn = ttk.Button(adapter_frame, text="刷新", command=self.refresh_network_adapters, width=8, style='Refresh.TButton')
+        refresh_btn.grid(row=0, column=2, sticky=tk.E)
+        self.add_button_hover_effect(refresh_btn)
         
         # 创建左右分栏
         paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
-        paned_window.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
+        paned_window.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
         
         # 左侧：当前IP信息
         left_frame = ttk.LabelFrame(paned_window, text="当前IP信息", padding="8")
-        paned_window.add(left_frame, weight=1)
+        paned_window.add(left_frame, weight=3)  # 左侧占3份空间
         
         # IP信息文本框
-        self.ip_info_text = tk.Text(left_frame, height=18, width=40, state=tk.DISABLED, font=("Consolas", 9))
+        self.ip_info_text = tk.Text(left_frame, height=16, width=45, state=tk.DISABLED, font=("Consolas", 11), 
+                                   bg='#F5F5F5', fg='#333333', selectbackground='#2196F3', selectforeground='white')
         self.ip_info_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # 滚动条
@@ -96,7 +236,7 @@ class IPManager:
         
         # 右侧：IP配置
         right_frame = ttk.LabelFrame(paned_window, text="IP配置", padding="8")
-        paned_window.add(right_frame, weight=1)
+        paned_window.add(right_frame, weight=2)  # 右侧占2份空间，确保有足够宽度
         
         # 主IP配置框架
         main_ip_frame = ttk.LabelFrame(right_frame, text="主IP配置", padding="5")
@@ -148,11 +288,13 @@ class IPManager:
         btn_frame.columnconfigure(1, weight=1)
         
         # 添加额外IP按钮
-        add_ip_btn = ttk.Button(btn_frame, text="添加IP", command=self.add_extra_ip, width=10)
+        add_ip_btn = ttk.Button(btn_frame, text="添加IP", command=self.add_extra_ip, width=10, style='AddIP.TButton')
         add_ip_btn.grid(row=0, column=0, padx=2, pady=2, sticky=tk.E)
+        self.add_button_hover_effect(add_ip_btn)
         
-        clear_ip_btn = ttk.Button(btn_frame, text="清空", command=self.clear_extra_ips, width=10)
+        clear_ip_btn = ttk.Button(btn_frame, text="清空", command=self.clear_extra_ips, width=10, style='Clear.TButton')
         clear_ip_btn.grid(row=0, column=1, padx=2, pady=2, sticky=tk.W)
+        self.add_button_hover_effect(clear_ip_btn)
         
         # 操作按钮框架
         button_frame = ttk.LabelFrame(right_frame, text="IP操作", padding="5")
@@ -162,21 +304,25 @@ class IPManager:
         
         # 操作按钮 - 第一行
         self.set_static_btn = ttk.Button(button_frame, text="设置静态IP", 
-                                        command=self.set_static_ip, width=12)
+                                        command=self.set_static_ip, width=12, style='StaticIP.TButton')
         self.set_static_btn.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
+        self.add_button_hover_effect(self.set_static_btn)
         
         self.set_dhcp_btn = ttk.Button(button_frame, text="设置DHCP", 
-                                      command=self.set_dhcp, width=12)
+                                      command=self.set_dhcp, width=12, style='DHCP.TButton')
         self.set_dhcp_btn.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
+        self.add_button_hover_effect(self.set_dhcp_btn)
         
         # 操作按钮 - 第二行
         self.refresh_ip_btn = ttk.Button(button_frame, text="刷新", 
-                                        command=self.refresh_ip_info, width=12)
+                                        command=self.refresh_ip_info, width=12, style='RefreshInfo.TButton')
         self.refresh_ip_btn.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
+        self.add_button_hover_effect(self.refresh_ip_btn)
         
         self.export_btn = ttk.Button(button_frame, text="导出配置", 
-                                    command=self.export_config, width=12)
+                                    command=self.export_config, width=12, style='Export.TButton')
         self.export_btn.grid(row=1, column=1, padx=3, pady=3, sticky=tk.W)
+        self.add_button_hover_effect(self.export_btn)
         
         # 网卡控制按钮框架
         adapter_control_frame = ttk.LabelFrame(right_frame, text="网卡控制", padding="5")
@@ -186,24 +332,27 @@ class IPManager:
         
         # 网卡控制按钮 - 第一行
         self.disable_btn = ttk.Button(adapter_control_frame, text="禁用网卡", 
-                                     command=self.disable_adapter, width=12)
+                                     command=self.disable_adapter, width=12, style='Disable.TButton')
         self.disable_btn.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
+        self.add_button_hover_effect(self.disable_btn)
         
         self.enable_btn = ttk.Button(adapter_control_frame, text="启用网卡", 
-                                    command=self.enable_adapter, width=12)
+                                    command=self.enable_adapter, width=12, style='Enable.TButton')
         self.enable_btn.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
+        self.add_button_hover_effect(self.enable_btn)
         
         # 网卡控制按钮 - 第二行
         self.reset_network_btn = ttk.Button(adapter_control_frame, text="重置网络", 
-                                           command=self.reset_network, width=12)
+                                           command=self.reset_network, width=12, style='Reset.TButton')
         self.reset_network_btn.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
+        self.add_button_hover_effect(self.reset_network_btn)
         
         # 状态栏
         self.status_var = tk.StringVar()
         self.status_var.set("就绪")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, 
-                              relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
+                              relief=tk.SUNKEN, anchor=tk.W, style='Status.TLabel')
+        status_bar.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
         
         # 适配器映射
         self.adapter_map = {}
@@ -214,6 +363,15 @@ class IPManager:
         if len(self.extra_ips) >= 5:  # 限制最多5个额外IP
             messagebox.showwarning("警告", "最多只能添加5个额外IP地址")
             return
+        
+        # 添加标签（只在第一次添加时创建）
+        if len(self.extra_ips) == 0:
+            if not hasattr(self, 'extra_ip_label_frame') or not self.extra_ip_label_frame.winfo_exists():
+                self.extra_ip_label_frame = ttk.Frame(self.extra_ip_frame)
+                self.extra_ip_label_frame.pack(fill=tk.X, pady=2)
+                ttk.Label(self.extra_ip_label_frame, text="IP地址").pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Label(self.extra_ip_label_frame, text="子网掩码").pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Label(self.extra_ip_label_frame, text="操作").pack(side=tk.LEFT)
             
         ip_frame = ttk.Frame(self.extra_ip_frame)
         ip_frame.pack(fill=tk.X, pady=2)
@@ -232,8 +390,9 @@ class IPManager:
         
         # 删除按钮
         del_btn = ttk.Button(ip_frame, text="删除", 
-                           command=lambda: self.remove_extra_ip(ip_frame, ip_var, mask_var))
+                           command=lambda: self.remove_extra_ip(ip_frame, ip_var, mask_var), style='Clear.TButton')
         del_btn.pack(side=tk.LEFT)
+        self.add_button_hover_effect(del_btn)
         
         # 保存引用
         self.extra_ips.append({
@@ -242,18 +401,15 @@ class IPManager:
             'mask_var': mask_var
         })
         
-        # 添加标签
-        if len(self.extra_ips) == 1:
-            label_frame = ttk.Frame(self.extra_ip_frame)
-            label_frame.pack(fill=tk.X, pady=2)
-            ttk.Label(label_frame, text="IP地址").pack(side=tk.LEFT, padx=(0, 5))
-            ttk.Label(label_frame, text="子网掩码").pack(side=tk.LEFT, padx=(0, 5))
-            ttk.Label(label_frame, text="操作").pack(side=tk.LEFT)
-        
     def remove_extra_ip(self, frame, ip_var, mask_var):
         """删除额外IP地址"""
         frame.destroy()
         self.extra_ips = [ip for ip in self.extra_ips if ip['ip_var'] != ip_var]
+        
+        # 如果删除后没有额外IP了，也删除标签框架
+        if len(self.extra_ips) == 0:
+            if hasattr(self, 'extra_ip_label_frame') and self.extra_ip_label_frame.winfo_exists():
+                self.extra_ip_label_frame.destroy()
         
     def clear_extra_ips(self):
         """清空所有额外IP地址"""
@@ -261,14 +417,22 @@ class IPManager:
             ip_info['frame'].destroy()
         self.extra_ips.clear()
         
+        # 删除标签框架
+        if hasattr(self, 'extra_ip_label_frame') and self.extra_ip_label_frame.winfo_exists():
+            self.extra_ip_label_frame.destroy()
+        
     def get_extra_ips(self):
         """获取所有额外IP地址"""
         extra_ips = []
         for ip_info in self.extra_ips:
             ip = ip_info['ip_var'].get().strip()
             mask = ip_info['mask_var'].get().strip()
-            if ip and mask and self.is_valid_ip(ip) and self.is_valid_ip(mask):
-                extra_ips.append((ip, mask))
+            # 使用新的验证函数
+            if ip and mask:
+                is_valid_ip, _ = self.validate_ip_address(ip, "额外IP地址")
+                is_valid_mask, _ = self.validate_ip_address(mask, "额外子网掩码")
+                if is_valid_ip and is_valid_mask:
+                    extra_ips.append((ip, mask))
         return extra_ips
         
     def refresh_network_adapters(self):
@@ -509,14 +673,43 @@ class IPManager:
             # 显示IPv4地址
             if ipv4_addresses:
                 info_lines.append("  IPv4地址:")
-                # 显示主IPv4地址
-                main_ip, main_mask = ipv4_addresses[0]
-                info_lines.append(f"    主IP: {main_ip} / {main_mask}")
                 
-                # 显示额外IPv4地址
-                if len(ipv4_addresses) > 1:
+                # 根据网关确定主IP
+                main_ip_found = False
+                main_ip_info = None
+                extra_ips = []
+                
+                if hasattr(nic, 'DefaultIPGateway') and nic.DefaultIPGateway:
+                    # 获取第一个IPv4网关
+                    gateway = None
+                    for gw in nic.DefaultIPGateway:
+                        if re.match(r'^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$', gw):
+                            gateway = gw
+                            break
+                    
+                    if gateway:
+                        # 检查哪个IP地址与网关在同一网段
+                        for ip, mask in ipv4_addresses:
+                            if self.is_same_network(ip, gateway, mask):
+                                main_ip_info = (ip, mask)
+                                main_ip_found = True
+                            else:
+                                extra_ips.append((ip, mask))
+                
+                # 如果没有找到与网关匹配的主IP，使用第一个IPv4地址
+                if not main_ip_found:
+                    main_ip_info = ipv4_addresses[0]
+                    extra_ips = ipv4_addresses[1:]
+                
+                # 显示主IP
+                if main_ip_info:
+                    main_ip, main_mask = main_ip_info
+                    info_lines.append(f"    主IP: {main_ip} / {main_mask}")
+                
+                # 显示额外IP
+                if extra_ips:
                     info_lines.append("    额外IP:")
-                    for i, (ip, mask) in enumerate(ipv4_addresses[1:], 1):
+                    for i, (ip, mask) in enumerate(extra_ips, 1):
                         info_lines.append(f"      {i}. {ip} / {mask}")
             
             # 显示IPv6地址
@@ -707,8 +900,36 @@ class IPManager:
                     except (socket.error, AttributeError):
                         pass  # 忽略无效的IP地址
             
-            # 设置主IP为第一个IPv4地址
-            if ipv4_addresses:
+            # 根据网关确定主IP
+            main_ip_found = False
+            if ipv4_addresses and hasattr(nic, 'DefaultIPGateway') and nic.DefaultIPGateway:
+                # 获取第一个IPv4网关
+                gateway = None
+                for gw in nic.DefaultIPGateway:
+                    if re.match(r'^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$', gw):
+                        gateway = gw
+                        break
+                
+                if gateway:
+                    # 检查哪个IP地址与网关在同一网段
+                    for ip, mask in ipv4_addresses:
+                        if self.is_same_network(ip, gateway, mask):
+                            # 找到与网关同网段的IP作为主IP
+                            self.ip_var.set(ip)
+                            self.mask_var.set(mask)
+                            main_ip_found = True
+                            
+                            # 添加其他IPv4地址为额外IP
+                            for other_ip, other_mask in ipv4_addresses:
+                                if other_ip != ip:
+                                    self.add_extra_ip()
+                                    if len(self.extra_ips) > 0:
+                                        self.extra_ips[-1]['ip_var'].set(other_ip)
+                                        self.extra_ips[-1]['mask_var'].set(other_mask)
+                            break
+            
+            # 如果没有找到与网关匹配的主IP，使用第一个IPv4地址
+            if not main_ip_found and ipv4_addresses:
                 main_ip, main_mask = ipv4_addresses[0]
                 self.ip_var.set(main_ip)
                 self.mask_var.set(main_mask)
@@ -721,7 +942,7 @@ class IPManager:
                         self.extra_ips[i]['mask_var'].set(mask)
             
             # 如果没有IPv4地址但有IPv6地址，使用第一个IPv6地址作为主IP
-            elif ipv6_addresses:
+            elif not main_ip_found and ipv6_addresses:
                 main_ip, main_mask = ipv6_addresses[0]
                 self.ip_var.set(main_ip)
                 self.mask_var.set(main_mask)
@@ -817,9 +1038,31 @@ class IPManager:
             messagebox.showwarning("警告", "请填写IP地址和子网掩码")
             return
         
-        if not self.is_valid_ip(ip):
-            messagebox.showerror("错误", "IP地址格式不正确")
+        # 详细验证IP地址
+        is_valid, error_msg = self.validate_ip_address(ip, "IP地址")
+        if not is_valid:
+            messagebox.showerror("错误", error_msg)
             return
+        
+        # 详细验证子网掩码
+        is_valid, error_msg = self.validate_ip_address(mask, "子网掩码")
+        if not is_valid:
+            messagebox.showerror("错误", error_msg)
+            return
+        
+        # 验证网关（如果填写了）
+        if gateway:
+            is_valid, error_msg = self.validate_ip_address(gateway, "默认网关")
+            if not is_valid:
+                messagebox.showerror("错误", error_msg)
+                return
+        
+        # 验证DNS（如果填写了）
+        if dns:
+            is_valid, error_msg = self.validate_ip_address(dns, "DNS服务器")
+            if not is_valid:
+                messagebox.showerror("错误", error_msg)
+                return
         
         try:
             self.status_var.set("正在设置静态IP...")
@@ -935,16 +1178,32 @@ class IPManager:
                 messagebox.showerror("错误", f"导出配置时出错:\n{str(e)}")
     
     def validate_ipv4_entry(self, value):
-        """验证IPv4输入格式"""
+        """验证IPv4输入格式和数值范围"""
         if len(value) > 15:
             return False
         if value == "":
             return True
+        
+        # 检查格式
         pattern = r'^\d{0,3}(\.\d{0,3}){0,3}$'
-        return re.match(pattern, value) is not None
+        if not re.match(pattern, value):
+            return False
+        
+        # 检查每个段的值是否超过255
+        parts = value.split('.')
+        for part in parts:
+            if part and int(part) > 255:
+                return False
+        
+        return True
 
     def is_valid_ip(self, ip):
         """校验IP地址（支持IPv4和IPv6）"""
+        if not ip or not ip.strip():
+            return False
+            
+        ip = ip.strip()
+        
         # 检查是否为IPv4
         ipv4_pattern = r'^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$'
         if re.match(ipv4_pattern, ip):
@@ -955,6 +1214,59 @@ class IPManager:
             socket.inet_pton(socket.AF_INET6, ip)
             return True
         except (socket.error, AttributeError):
+            return False
+    
+    def validate_ip_address(self, ip, field_name="IP地址"):
+        """详细验证IP地址并返回错误信息"""
+        if not ip or not ip.strip():
+            return False, f"{field_name}不能为空"
+        
+        ip = ip.strip()
+        
+        # 检查基本格式
+        if not re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
+            return False, f"{field_name}格式错误，应为x.x.x.x格式"
+        
+        # 检查每个段的值
+        parts = ip.split('.')
+        for i, part in enumerate(parts):
+            try:
+                value = int(part)
+                if value < 0 or value > 255:
+                    return False, f"{field_name}第{i+1}段值({value})超出范围(0-255)"
+            except ValueError:
+                return False, f"{field_name}第{i+1}段({part})不是有效数字"
+        
+        return True, ""
+    
+    def is_same_network(self, ip1, ip2, subnet_mask):
+        """检查两个IP地址是否在同一网段"""
+        try:
+            # 将IP地址和子网掩码转换为整数
+            def ip_to_int(ip):
+                parts = ip.split('.')
+                return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
+            
+            def mask_to_int(mask):
+                if '.' in mask:
+                    # 点分十进制格式的子网掩码
+                    parts = mask.split('.')
+                    return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
+                else:
+                    # CIDR格式的子网掩码
+                    prefix_len = int(mask)
+                    return (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF
+            
+            ip1_int = ip_to_int(ip1)
+            ip2_int = ip_to_int(ip2)
+            mask_int = mask_to_int(subnet_mask)
+            
+            # 计算网络地址
+            network1 = ip1_int & mask_int
+            network2 = ip2_int & mask_int
+            
+            return network1 == network2
+        except (ValueError, IndexError):
             return False
 
     def disable_adapter(self):

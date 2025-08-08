@@ -209,6 +209,7 @@
   ('typing', 'C:\\Python313\\Lib\\typing.py', 'PYMODULE'),
   ('urllib', 'C:\\Python313\\Lib\\urllib\\__init__.py', 'PYMODULE'),
   ('urllib.parse', 'C:\\Python313\\Lib\\urllib\\parse.py', 'PYMODULE'),
+  ('version', 'C:\\ip_manager\\version.py', 'PYMODULE'),
   ('win32com',
    'C:\\Python313\\Lib\\site-packages\\win32com\\__init__.py',
    'PYMODULE'),
