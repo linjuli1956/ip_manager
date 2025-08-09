@@ -37,14 +37,17 @@ def build_exe():
             "--onefile",  # 打包成单个文件
             "--windowed",  # 不显示控制台窗口
             "--name=IP管理器",  # 可执行文件名称
-            "--icon=icon.ico",  # 图标文件（如果存在）
-            "--add-data=icon.ico;.",  # 添加图标文件到打包中
+            "--icon=IP管理器.ico",  # 图标文件（如果存在）
+            "--add-data=IP管理器.ico;.",  # 添加图标文件到打包中
+            "--add-data=ip_manager_256x256.png;.",  # 用于窗口iconphoto
             "main.py"
         ]
         
-        # 如果图标文件不存在，移除相关参数
-        if not os.path.exists("icon.ico"):
-            cmd = [arg for arg in cmd if "icon.ico" not in arg]
+        # 如果图标或PNG不存在，移除相关参数
+        if not os.path.exists("IP管理器.ico"):
+            cmd = [arg for arg in cmd if "IP管理器.ico" not in arg]
+        if not os.path.exists("ip_manager_256x256.png"):
+            cmd = [arg for arg in cmd if "ip_manager_256x256.png" not in arg]
         
         print("开始构建EXE文件...")
         print(f"执行命令: {' '.join(cmd)}")

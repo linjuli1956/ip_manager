@@ -37,7 +37,18 @@ setup_tcl_tk()
 # 现在导入tkinter
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import tkinter.font as tkfont
+ 
+# Global theme constants (Apple-like)
+PRIMARY_BG = '#ECFDF5'  # light green background
+PRIMARY_FG = '#222'
+SUBTLE = '#6B7280'
+ACCENT = '#0A84FF'       # macOS blue
+ACCENT_HOVER = '#0063E1'
+ACCENT_PRESSED = '#0052BF'
 import subprocess
+import winreg
+import glob
 import re
 import socket
 import threading
@@ -57,13 +68,38 @@ except ImportError:
     def get_version_string():
         return f"{VERSION} (构建日期: {BUILD_DATE})"
 
+def resource_path(relative_path: str) -> str:
+    """获取打包后资源的真实路径（兼容PyInstaller）。"""
+    try:
+        base_path = sys._MEIPASS  # type: ignore[attr-defined]
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 class IPManager:
     
     def __init__(self, root):
         self.root = root
         self.root.title("Windows IP地址管理器")
-        self.root.geometry("945x910")  # 调整为945x910窗口
+        self.root.geometry("1024x680")  # 默认窗口大小 1024x680
         self.root.resizable(True, True)
+
+        # 设置应用图标（EXE与窗口内一致）
+        try:
+            ico_path = resource_path("IP管理器.ico")
+            if os.path.exists(ico_path):
+                self.root.iconbitmap(ico_path)
+        except Exception:
+            pass
+
+        try:
+            png_path = resource_path("ip_manager_256x256.png")
+            if os.path.exists(png_path):
+                # 保持引用避免被GC
+                self._icon_img = tk.PhotoImage(file=png_path)
+                self.root.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
         
         # 设置样式
         style = ttk.Style()
@@ -137,6 +173,12 @@ class IPManager:
                  background=[('active', '#F06292'), ('pressed', '#E91E63')], 
                  foreground=[('active', 'white'), ('pressed', 'white')])
         style.configure('Reset.TButton', font=('Arial', 11), background='#E91E63', foreground='white')
+
+        # Ping按钮（统一macOS蓝）
+        style.map('Ping.TButton',
+                 background=[('active', '#0063E1'), ('pressed', '#0052BF')],
+                 foreground=[('active', 'white'), ('pressed', 'white')])
+        style.configure('Ping.TButton', font=('Arial', 11), background='#0A84FF', foreground='white')
         
         # 状态栏样式
         style.configure('Status.TLabel', font=('Arial', 11), background='#E3F2FD', foreground='#1976D2')
@@ -157,6 +199,393 @@ class IPManager:
             self.refresh_network_adapters()
         else:
             self.status_var.set("WMI初始化失败，部分功能不可用")
+
+    def run_ping(self, target: str) -> None:
+        """在系统cmd中启动持续ping（-t）。"""
+        if not target.strip():
+            messagebox.showwarning("提示", "请输入要测试的目标地址")
+            return
+        try:
+            # 在独立cmd窗口中持续ping，避免阻塞GUI
+            # start 新开窗口；/k 执行后保持窗口
+            cmd = f'start cmd /k ping {target} -t'
+            subprocess.Popen(cmd, shell=True)
+            self.status_var.set(f"正在测试网络: ping {target} -t（已在新窗口打开）")
+        except Exception as e:
+            messagebox.showerror("错误", f"启动ping失败: {e}")
+
+    def run_tracert(self, target: str) -> None:
+        """在系统cmd中启动 tracert 目标。"""
+        if not target.strip():
+            messagebox.showwarning("提示", "请输入要追踪的目标地址")
+            return
+        try:
+            # start 新开窗口；/k 执行后保持窗口
+            cmd = f'start cmd /k tracert {target}'
+            subprocess.Popen(cmd, shell=True)
+            self.status_var.set(f"正在进行网络追踪: tracert {target}（已在新窗口打开）")
+        except Exception as e:
+            messagebox.showerror("错误", f"启动网络追踪失败: {e}")
+
+    def clear_browser_cache(self) -> None:
+        """清理常见浏览器缓存（Edge/Chrome/360/IE），不删除账号密码等数据，带进度弹窗。"""
+        def _remove_dir(path: str) -> bool:
+            if not os.path.exists(path):
+                return False
+            try:
+                import shutil
+                shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass
+            # 双保险（处理被占用残留）
+            try:
+                subprocess.run(f'cmd /c rmdir /s /q "{path}"', shell=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            return not os.path.exists(path)
+
+        def _do_clear(update_progress=lambda v, t: None, close_dialog=lambda: None):
+            try:
+                self.status_var.set("正在清理浏览器缓存...")
+                self.root.update()
+
+                # 结束常见浏览器进程
+                for exe in ("msedge.exe", "chrome.exe", "360chrome.exe", "360se.exe", "iexplore.exe"):
+                    subprocess.run(f'taskkill /f /im {exe}', shell=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                userprofile = os.environ.get('USERPROFILE', '')
+
+                # 需要清理的子目录（不会影响密码/登录状态的数据，如 Cookies/Login Data/Local Storage 均不删除）
+                cache_subdirs = [
+                    'Cache', 'Code Cache', os.path.join('Service Worker', 'CacheStorage'),
+                    'GPUCache', 'Media Cache', 'ShaderCache'
+                ]
+
+                cleaned = 0
+                # 统计总步数（Edge/Chrome/360 的 profiles × subdirs）
+                edge_profiles = glob.glob(os.path.join(userprofile, 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data', '*'))
+                chrome_profiles = glob.glob(os.path.join(userprofile, 'AppData', 'Local', 'Google', 'Chrome', 'User Data', '*'))
+                se360_profiles = glob.glob(os.path.join(userprofile, 'AppData', 'Local', '360Chrome', 'Chrome', 'User Data', '*'))
+                total_steps = (
+                    max(1, len(edge_profiles)) * len(cache_subdirs) +
+                    max(1, len(chrome_profiles)) * len(cache_subdirs) +
+                    max(1, len(se360_profiles)) * len(cache_subdirs) + 2  # + 结束进程 + IE
+                )
+
+                # Edge
+                for prof in (edge_profiles or [os.path.join(userprofile, 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data', 'Default')]):
+                    for sub in cache_subdirs:
+                        _remove_dir(os.path.join(prof, sub))
+                        cleaned += 1
+                        update_progress(cleaned, total_steps)
+
+                # Chrome
+                for prof in (chrome_profiles or [os.path.join(userprofile, 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default')]):
+                    for sub in cache_subdirs:
+                        _remove_dir(os.path.join(prof, sub))
+                        cleaned += 1
+                        update_progress(cleaned, total_steps)
+
+                # 360极速
+                for prof in (se360_profiles or [os.path.join(userprofile, 'AppData', 'Local', '360Chrome', 'Chrome', 'User Data', 'Default')]):
+                    for sub in cache_subdirs:
+                        _remove_dir(os.path.join(prof, sub))
+                        cleaned += 1
+                        update_progress(cleaned, total_steps)
+
+                # IE/旧Edge 仅清理临时文件，不动Cookies/密码
+                try:
+                    subprocess.run('RunDll32.exe InetCpl.cpl,ClearMyTracksByProcess 8', shell=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                cleaned += 1
+                update_progress(cleaned, total_steps)
+
+                self.status_var.set("浏览器缓存清理完成")
+                messagebox.showinfo("完成", "浏览器缓存清理完成（未清除登录状态与密码）。若浏览器已打开，请关闭并重新打开以生效。")
+                close_dialog()
+            except Exception as e:
+                self.status_var.set(f"清理缓存出错: {e}")
+                messagebox.showerror("错误", f"清理缓存时出错:\n{e}")
+                close_dialog()
+
+        # 后台执行，避免阻塞UI
+        try:
+            # 创建进度弹窗
+            progress_win = tk.Toplevel(self.root)
+            progress_win.title("正在清理缓存…")
+            progress_win.resizable(False, False)
+            ttk.Label(progress_win, text="正在清理浏览器缓存，请稍候…").grid(row=0, column=0, padx=12, pady=8)
+            progress = ttk.Progressbar(progress_win, mode='determinate', length=260)
+            progress.grid(row=1, column=0, padx=12, pady=(0, 12))
+
+            def update_progress(cur, total):
+                try:
+                    progress['maximum'] = total
+                    progress['value'] = cur
+                    progress_win.update_idletasks()
+                except Exception:
+                    pass
+
+            def close_dialog():
+                try:
+                    progress_win.destroy()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_do_clear, args=(update_progress, close_dialog), daemon=True)
+            t.start()
+        except Exception:
+            _do_clear()
+
+    def _run_cmd_silent(self, cmd: str) -> int:
+        """静默执行命令，不读取输出，返回returncode。"""
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            return int(result.returncode)
+        except Exception:
+            return 1
+
+    def _run_cmd_text(self, cmd: str) -> tuple[int, str, str]:
+        """执行命令并返回 (returncode, stdout, stderr)，使用gbk解码容错。"""
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                encoding='gbk',
+                errors='ignore',
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            return int(result.returncode), result.stdout or "", result.stderr or ""
+        except Exception as e:
+            return 1, "", str(e)
+
+    def flush_dns_cache(self) -> None:
+        """刷新DNS缓存。"""
+        self.status_var.set("正在刷新DNS缓存…")
+        self.root.update()
+        rc = self._run_cmd_silent("ipconfig /flushdns")
+        if rc == 0:
+            self.status_var.set("已刷新DNS缓存")
+            messagebox.showinfo("完成", "已刷新DNS缓存。")
+        else:
+            self.status_var.set("刷新DNS缓存失败")
+            messagebox.showwarning("提示", "刷新DNS缓存失败，可能需要以管理员身份运行。")
+
+    def ip_release(self) -> None:
+        """释放当前适配器的IP地址。"""
+        if not messagebox.askyesno("确认", "确定要释放当前IP地址吗？网络将短暂中断。"):
+            return
+        self.status_var.set("正在释放IP地址…")
+        self.root.update()
+        rc = self._run_cmd_silent("ipconfig /release")
+        if rc == 0:
+            self.status_var.set("已释放IP地址")
+            messagebox.showinfo("完成", "已释放IP地址。")
+        else:
+            self.status_var.set("释放IP地址失败")
+            messagebox.showwarning("提示", "释放IP地址失败，可能需要以管理员身份运行。")
+
+    def ip_renew(self) -> None:
+        """续租当前适配器的IP地址。"""
+        self.status_var.set("正在续租IP地址…")
+        self.root.update()
+        rc = self._run_cmd_silent("ipconfig /renew")
+        if rc == 0:
+            self.status_var.set("已续租IP地址")
+            messagebox.showinfo("完成", "已续租IP地址。")
+        else:
+            self.status_var.set("续租IP地址失败")
+            messagebox.showwarning("提示", "续租IP地址失败，可能需要以管理员身份运行。")
+
+    def winsock_reset_quick(self) -> None:
+        """快速Winsock重置（可能需要重启）。"""
+        if not messagebox.askyesno(
+            "确认",
+            "确定要重置Winsock吗？\n此操作可能需要重启后生效。",
+        ):
+            return
+        self.status_var.set("正在执行 Winsock 重置…")
+        self.root.update()
+        rc = self._run_cmd_silent("netsh winsock reset")
+        if rc == 0:
+            self.status_var.set("Winsock 重置完成")
+            if messagebox.askyesno("完成", "Winsock 重置完成，是否立即重启以生效？"):
+                try:
+                    self._run_cmd_silent("shutdown /r /t 0")
+                except Exception:
+                    messagebox.showwarning("提示", "无法自动重启，请手动重启计算机。")
+        else:
+            self.status_var.set("Winsock 重置失败")
+            messagebox.showwarning("提示", "Winsock 重置失败，可能需要以管理员身份运行。")
+
+    def toggle_win11_autologon(self) -> None:
+        """Win11 自动登录开关：
+        - 设置 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device\DevicePasswordLessBuildVersion = 0 开启可见的 netplwiz 取消密码登录
+        - 设置为 2 恢复默认(隐藏)
+        显示当前状态并提供切换。
+        """
+        key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device"
+        value_name = "DevicePasswordLessBuildVersion"
+        try:
+            with winreg.ConnectRegistry(None, winreg.HKEY_LOCAL_MACHINE) as reg:
+                try:
+                    with winreg.OpenKey(reg, key_path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+                        current, _ = winreg.QueryValueEx(k, value_name)
+                except FileNotFoundError:
+                    current = 2
+        except Exception as e:
+            messagebox.showerror("错误", f"读取注册表失败：{e}\n请以管理员身份运行。")
+            return
+
+        is_enabled = (int(current) == 0)
+        action = "恢复默认(隐藏选项)" if is_enabled else "开启(显示选项)"
+
+        if not messagebox.askyesno("确认切换", f"当前状态：{'已开启' if is_enabled else '未开启'}\n\n是否执行：{action}？"):
+            return
+
+        new_value = 2 if is_enabled else 0
+        try:
+            with winreg.ConnectRegistry(None, winreg.HKEY_LOCAL_MACHINE) as reg:
+                with winreg.CreateKeyEx(reg, key_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as k:
+                    winreg.SetValueEx(k, value_name, 0, winreg.REG_DWORD, int(new_value))
+            self.status_var.set("已更新自动登录选项")
+            # 自动启动 netplwiz（新窗口，不阻塞）
+            try:
+                # 使用 cmd 的 start 启动，避免路径与位数问题
+                self._run_cmd_silent('cmd /c start "" netplwiz')
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "完成",
+                "设置已应用，已为你打开 netplwiz。\n\n在弹出的窗口中取消勾选“要使用本计算机，用户必须输入用户名和密码”，并输入密码以启用开机自动登录。"
+            )
+        except PermissionError:
+            messagebox.showerror("错误", "写入注册表失败：权限不足。请以管理员身份运行程序。")
+        except Exception as e:
+            messagebox.showerror("错误", f"写入注册表失败：{e}")
+
+    def enable_firewall_ping(self) -> None:
+        """允许 ICMPv4 ping：创建并启用允许规则，同时禁用阻止规则。"""
+        try:
+            self.status_var.set("正在配置防火墙允许 ping …")
+            self.root.update()
+            # 先禁用阻止规则
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Request_Block" new enable=no')
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Reply_Block" new enable=no')
+            # 创建或启用允许规则
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Request_Allow" new enable=yes')
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Reply_Allow" new enable=yes')
+            self._run_cmd_silent('netsh advfirewall firewall add rule name="IPM_ICMPv4_Echo_Request_Allow" dir=in action=allow protocol=icmpv4:8,any')
+            self._run_cmd_silent('netsh advfirewall firewall add rule name="IPM_ICMPv4_Echo_Reply_Allow" dir=out action=allow protocol=icmpv4:0,any')
+
+            if self._is_firewall_ping_enabled():
+                self.status_var.set("已允许防火墙 ping（ICMPv4）")
+                messagebox.showinfo("完成", "已配置 ICMPv4（ping）允许规则。若仍提示失败但能够ping通，这是正常的（状态判定为保守逻辑）。")
+            else:
+                self.status_var.set("配置ping规则失败，可能需要以管理员身份运行")
+                messagebox.showwarning(
+                    "提示",
+                    "配置失败或被策略阻止。若实际可以 ping 通，请忽略此提示；也可检查是否有第三方安全策略覆盖。"
+                )
+        except Exception as e:
+            self.status_var.set(f"配置失败: {e}")
+            messagebox.showerror("错误", f"配置防火墙允许 ping 失败:\n{e}")
+
+    def _is_firewall_ping_enabled(self) -> bool:
+        """根据以下顺序判断是否允许 ping：
+        1) 若任一自建 Block 规则启用 => 视为禁用
+        2) 若任一自建 Allow 规则启用 => 视为允许
+        3) 若防火墙总体关闭 => 视为允许
+        4) 若存在任一启用的 ICMPv4 入站允许规则（任意名称/本地化）=> 视为允许
+        5) 回退：通用名称检测
+        """
+        allow_req = 'IPM_ICMPv4_Echo_Request_Allow'
+        allow_rep = 'IPM_ICMPv4_Echo_Reply_Allow'
+        block_req = 'IPM_ICMPv4_Echo_Request_Block'
+        block_rep = 'IPM_ICMPv4_Echo_Reply_Block'
+
+        def _is_enabled(name: str) -> bool:
+            rc, out, _ = self._run_cmd_text(f'netsh advfirewall firewall show rule name="{name}"')
+            if rc != 0:
+                return False
+            t = out.lower()
+            return ('enabled: yes' in t) or ('enable: yes' in t) or ('已启用' in out) or ('启用: 是' in out)
+
+        # Block 优先
+        if _is_enabled(block_req) or _is_enabled(block_rep):
+            return False
+        if _is_enabled(allow_req) or _is_enabled(allow_rep):
+            return True
+
+        # 3) 防火墙总体关闭 => 视为允许
+        rc_fw, out_fw, _ = self._run_cmd_text('netsh advfirewall show allprofiles')
+        if rc_fw == 0:
+            txt = out_fw.lower()
+            if ('state' in txt and 'off' in txt) or ('状态' in out_fw and '关闭' in out_fw):
+                return True
+
+        # 4) 任一启用的 ICMPv4 入站允许规则（名称/语言不确定，做内容匹配）
+        rc_all, out_all, _ = self._run_cmd_text('netsh advfirewall firewall show rule name=all')
+        if rc_all == 0:
+            o_low = out_all.lower()
+            if ('icmpv4' in o_low) and (('allow' in o_low) or ('允许' in out_all)) and (('dir' in o_low and 'in' in o_low) or ('方向' in out_all and '入站' in out_all)):
+                return True
+
+        # 回退到通用本地化名称（尽力）
+        rc, out, _ = self._run_cmd_text('netsh advfirewall firewall show rule name="Allow ICMPv4 Echo Request"')
+        if rc == 0:
+            t = out.lower()
+            if ('enabled: yes' in t) or ('enable: yes' in t) or ('已启用' in out) or ('启用: 是' in out):
+                return True
+        return False
+
+    def disable_firewall_ping(self) -> None:
+        """禁用 ICMPv4 ping：创建并启用阻止规则，同时禁用本程序创建的允许规则。"""
+        try:
+            self.status_var.set("正在禁用防火墙 ping …")
+            self.root.update()
+            # 禁用允许规则（本程序自建）
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Request_Allow" new enable=no')
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Reply_Allow" new enable=no')
+            # 创建或启用阻止规则（阻止优先级高于允许）
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Request_Block" new enable=yes')
+            self._run_cmd_silent('netsh advfirewall firewall set rule name="IPM_ICMPv4_Echo_Reply_Block" new enable=yes')
+            self._run_cmd_silent('netsh advfirewall firewall add rule name="IPM_ICMPv4_Echo_Request_Block" dir=in action=block protocol=icmpv4:8,any')
+            self._run_cmd_silent('netsh advfirewall firewall add rule name="IPM_ICMPv4_Echo_Reply_Block" dir=out action=block protocol=icmpv4:0,any')
+
+            if not self._is_firewall_ping_enabled():
+                self.status_var.set("已禁用防火墙 ping（ICMPv4）")
+                messagebox.showinfo("完成", "已禁用 ICMPv4（ping）。如仍可ping通，可能是防火墙已关闭或存在更高优先级的允许策略。")
+            else:
+                self.status_var.set("禁用失败或被策略阻止")
+                messagebox.showwarning("提示", "禁用失败，可能需要以管理员身份运行，或被安全策略禁止。若实际无法ping通，则可忽略。")
+        except Exception as e:
+            self.status_var.set(f"禁用失败: {e}")
+            messagebox.showerror("错误", f"禁用防火墙 ping 失败:\n{e}")
+
+    def toggle_firewall_ping(self) -> None:
+        """开/关 防火墙 ping。根据当前状态提示并执行相反操作。"""
+        enabled = self._is_firewall_ping_enabled()
+        if enabled:
+            if not messagebox.askyesno("确认", "检测到已允许 ping（ICMPv4）。是否现在禁用？"):
+                return
+            self.disable_firewall_ping()
+        else:
+            if not messagebox.askyesno("确认", "检测到当前未允许 ping（ICMPv4）。是否现在开启？"):
+                return
+            self.enable_firewall_ping()
     
     def add_button_hover_effect(self, button):
         """为按钮添加鼠标悬停效果"""
@@ -174,9 +603,10 @@ class IPManager:
         main_frame = ttk.Frame(self.root, padding="8")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # 配置网格权重
+        # 配置网格权重（左侧更宽，右侧更窄）
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=4)
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(2, weight=1)
         
@@ -190,35 +620,19 @@ class IPManager:
         version_label = ttk.Label(main_frame, text=version_text, 
                                  font=("Arial", 11), foreground="gray")
         version_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
+
+        # 顶部：网络测试（ping）行（移动到右侧容器中显示）
         
-        # 网络适配器选择框架
-        adapter_frame = ttk.Frame(main_frame)
-        adapter_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=3)
-        adapter_frame.columnconfigure(1, weight=1)
+        # 右侧区域：先创建容器（后面把适配器区放进去）
         
-        # 网络适配器标签
-        adapter_label = ttk.Label(adapter_frame, text="网络适配器:")
-        adapter_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        # 两列布局：左宽右窄
+        main_frame.columnconfigure(0, weight=4)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1)
         
-        # 网络适配器下拉框
-        self.adapter_var = tk.StringVar()
-        self.adapter_combo = ttk.Combobox(adapter_frame, textvariable=self.adapter_var, 
-                                         state="readonly", width=80)  # 增加宽度
-        self.adapter_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 5))
-        self.adapter_combo.bind('<<ComboboxSelected>>', self.on_adapter_selected)
-        
-        # 刷新按钮
-        refresh_btn = ttk.Button(adapter_frame, text="刷新", command=self.refresh_network_adapters, width=8, style='Refresh.TButton')
-        refresh_btn.grid(row=0, column=2, sticky=tk.E)
-        self.add_button_hover_effect(refresh_btn)
-        
-        # 创建左右分栏
-        paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
-        paned_window.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
-        
-        # 左侧：当前IP信息
-        left_frame = ttk.LabelFrame(paned_window, text="当前IP信息", padding="8")
-        paned_window.add(left_frame, weight=3)  # 左侧占3份空间
+        # 左侧：当前IP信息（位于版本号下方，靠左整列）
+        left_frame = ttk.LabelFrame(main_frame, text="当前IP信息", padding="8")
+        left_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
         
         # IP信息文本框
         self.ip_info_text = tk.Text(left_frame, height=16, width=45, state=tk.DISABLED, font=("Consolas", 11), 
@@ -234,114 +648,246 @@ class IPManager:
         left_frame.columnconfigure(0, weight=1)
         left_frame.rowconfigure(0, weight=1)
         
-        # 右侧：IP配置
-        right_frame = ttk.LabelFrame(paned_window, text="IP配置", padding="8")
-        paned_window.add(right_frame, weight=2)  # 右侧占2份空间，确保有足够宽度
-        
-        # 主IP配置框架
-        main_ip_frame = ttk.LabelFrame(right_frame, text="主IP配置", padding="5")
+        # 右侧：容器放适配器/网络测试/工具栏/内容
+        right_frame = ttk.Frame(main_frame)
+        right_frame.grid(row=2, column=1, sticky=(tk.N, tk.S, tk.W, tk.E), pady=8)
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(3, weight=1)
+        right_frame.rowconfigure(4, weight=0)
+        right_frame.rowconfigure(5, weight=0)
+
+        # 适配器区：标题一行，选择框下一行
+        adapter_section = ttk.Frame(right_frame)
+        adapter_section.grid(row=0, column=0, sticky=(tk.E, tk.W), pady=(0,4))
+        ttk.Label(adapter_section, text="网络适配器").grid(row=0, column=0, sticky=tk.W)
+        # 在此处创建下拉框（避免未定义）
+        self.adapter_var = tk.StringVar()
+        self.adapter_combo = ttk.Combobox(
+            adapter_section,
+            textvariable=self.adapter_var,
+            state="readonly",
+            width=45,
+        )
+        self.adapter_combo.grid(row=1, column=0, sticky=(tk.E, tk.W), pady=(2, 0))
+        self.adapter_combo.bind('<<ComboboxSelected>>', self.on_adapter_selected)
+        # 右侧放置刷新按钮
+        refresh_btn = ttk.Button(adapter_section, text="刷新", command=self.refresh_network_adapters, width=8, style='Refresh.TButton')
+        refresh_btn.grid(row=1, column=1, sticky=tk.E, padx=(6, 0))
+        self.add_button_hover_effect(refresh_btn)
+
+        # 自定义工具栏
+
+        # 内网测试（ping 网关）行：放在网络测试上方
+        lan_ping_frame = ttk.Frame(right_frame)
+        # 放在Notebook（主IP配置区域）下方（将迁移到工具页）
+        lan_ping_frame.grid_forget()
+        self.lan_ping_target = tk.StringVar(value="")
+        # 将在工具页中渲染
+
+        # 清理浏览器缓存按钮（放在测试区下方，右对齐）
+        cache_frame = ttk.Frame(right_frame)
+        cache_frame.grid(row=6, column=0, sticky=tk.E, pady=(8, 0))
+        clear_cache_btn = ttk.Button(
+            cache_frame,
+            text="一键清理浏览器缓存 - Edge/360极速/Chrome",
+            command=self.clear_browser_cache
+        )
+        clear_cache_btn.grid(row=0, column=0)
+
+        # Notebook 与自定义工具栏
+        notebook = ttk.Notebook(right_frame)
+        notebook.grid(row=3, column=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        # 隐藏Notebook默认页签，避免与自定义工具栏重复
+        try:
+            style_hide = ttk.Style()
+            style_hide.layout('TNotebook.Tab', [])
+        except Exception:
+            pass
+        toolbar = ttk.Frame(right_frame)
+        toolbar.grid(row=2, column=0, sticky=tk.E, pady=(0, 6))
+        # 苹果风：分段按钮（Segmented）样式
+        seg_style = ttk.Style()
+        seg_style.configure('Segment.TButton', padding=(10, 6), relief='flat',
+                            background='#D1FAE5', foreground='#222')
+        seg_style.map('Segment.TButton',
+                      background=[('active', '#A7F3D0'), ('pressed', '#6EE7B7')])
+        seg_style.configure('SegmentSelected.TButton', padding=(10, 6), relief='flat',
+                            background=ACCENT, foreground='#FFFFFF')
+
+        self._seg_btns = []
+        def set_segment_selection(active_idx: int) -> None:
+            for idx, btn in enumerate(self._seg_btns):
+                btn.configure(style='SegmentSelected.TButton' if idx == active_idx else 'Segment.TButton')
+
+        def switch_tab(i:int):
+            notebook.select(i)
+            set_segment_selection(i)
+
+        # 与实际添加的四个选项卡保持一致
+        tb_texts = ["IP配置", "额外IP地址", "网卡控制", "工具"]
+        for i, t in enumerate(tb_texts):
+            b = ttk.Button(toolbar, text=t, style='Segment.TButton', command=lambda idx=i: switch_tab(idx))
+            b.grid(row=0, column=i, padx=(0 if i==0 else 2, 0))
+            self._seg_btns.append(b)
+        set_segment_selection(0)
+
+        # Tab1: IP配置
+        tab_ipcfg = ttk.Frame(notebook)
+        notebook.add(tab_ipcfg, text="IP配置")
+        main_ip_frame = ttk.LabelFrame(tab_ipcfg, text="主IP配置", padding="5")
         main_ip_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
         main_ip_frame.columnconfigure(1, weight=1)
-        
-        # IP地址
+
         ttk.Label(main_ip_frame, text="IP地址:").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.ip_var = tk.StringVar()
         self.ip_entry = ttk.Entry(main_ip_frame, textvariable=self.ip_var, width=22, validate='key')
         self.ip_entry['validatecommand'] = (self.ip_entry.register(self.validate_ipv4_entry), '%P')
         self.ip_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
-        
-        # 子网掩码
+
         ttk.Label(main_ip_frame, text="子网掩码:").grid(row=1, column=0, sticky=tk.W, pady=2)
         self.mask_var = tk.StringVar()
         self.mask_entry = ttk.Entry(main_ip_frame, textvariable=self.mask_var, width=22, validate='key')
         self.mask_entry['validatecommand'] = (self.mask_entry.register(self.validate_ipv4_entry), '%P')
         self.mask_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
-        
-        # 默认网关
+
         ttk.Label(main_ip_frame, text="默认网关:").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.gateway_var = tk.StringVar()
         self.gateway_entry = ttk.Entry(main_ip_frame, textvariable=self.gateway_var, width=22, validate='key')
         self.gateway_entry['validatecommand'] = (self.gateway_entry.register(self.validate_ipv4_entry), '%P')
         self.gateway_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
-        
-        # DNS服务器
+
         ttk.Label(main_ip_frame, text="DNS服务器:").grid(row=3, column=0, sticky=tk.W, pady=2)
         self.dns_var = tk.StringVar()
         self.dns_entry = ttk.Entry(main_ip_frame, textvariable=self.dns_var, width=22, validate='key')
         self.dns_entry['validatecommand'] = (self.dns_entry.register(self.validate_ipv4_entry), '%P')
         self.dns_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
-        
-        # 多IP配置框架
-        multi_ip_frame = ttk.LabelFrame(right_frame, text="额外IP地址", padding="5")
-        multi_ip_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
+
+        # 构建公用操作按钮组（设置静态IP/设置DHCP/刷新/导出配置）
+        def build_ip_actions(parent: tk.Widget) -> ttk.Frame:
+            actions = ttk.Frame(parent)
+            actions.columnconfigure(0, weight=1)
+            actions.columnconfigure(1, weight=1)
+
+            btn1 = ttk.Button(actions, text="设置静态IP", command=self.set_static_ip, width=12, style='StaticIP.TButton')
+            btn1.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
+            self.add_button_hover_effect(btn1)
+
+            btn2 = ttk.Button(actions, text="设置DHCP", command=self.set_dhcp, width=12, style='DHCP.TButton')
+            btn2.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
+            self.add_button_hover_effect(btn2)
+
+            btn3 = ttk.Button(actions, text="刷新", command=self.refresh_ip_info, width=12, style='RefreshInfo.TButton')
+            btn3.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
+            self.add_button_hover_effect(btn3)
+
+            btn4 = ttk.Button(actions, text="导出配置", command=self.export_config, width=12, style='Export.TButton')
+            btn4.grid(row=1, column=1, padx=3, pady=3, sticky=tk.W)
+            self.add_button_hover_effect(btn4)
+
+            return actions
+
+        # 在“IP配置”页底部加入操作区
+        actions1 = build_ip_actions(tab_ipcfg)
+        actions1.grid(row=1, column=0, sticky=(tk.W, tk.E))
+
+        # Tab2: 额外IP地址
+        tab_extra = ttk.Frame(notebook)
+        notebook.add(tab_extra, text="额外IP地址")
+        multi_ip_frame = ttk.LabelFrame(tab_extra, text="额外IP地址", padding="5")
+        multi_ip_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
         multi_ip_frame.columnconfigure(1, weight=1)
-        
-        # 额外IP列表
+
         self.extra_ips = []
         self.extra_ip_frame = ttk.Frame(multi_ip_frame)
         self.extra_ip_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=3)
-        
-        # 添加额外IP按钮框架
+
         btn_frame = ttk.Frame(multi_ip_frame)
         btn_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=3)
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
-        
-        # 添加额外IP按钮
+
         add_ip_btn = ttk.Button(btn_frame, text="添加IP", command=self.add_extra_ip, width=10, style='AddIP.TButton')
         add_ip_btn.grid(row=0, column=0, padx=2, pady=2, sticky=tk.E)
         self.add_button_hover_effect(add_ip_btn)
-        
+
         clear_ip_btn = ttk.Button(btn_frame, text="清空", command=self.clear_extra_ips, width=10, style='Clear.TButton')
         clear_ip_btn.grid(row=0, column=1, padx=2, pady=2, sticky=tk.W)
         self.add_button_hover_effect(clear_ip_btn)
-        
-        # 操作按钮框架
-        button_frame = ttk.LabelFrame(right_frame, text="IP操作", padding="5")
-        button_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
-        
-        # 操作按钮 - 第一行
-        self.set_static_btn = ttk.Button(button_frame, text="设置静态IP", 
-                                        command=self.set_static_ip, width=12, style='StaticIP.TButton')
-        self.set_static_btn.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
-        self.add_button_hover_effect(self.set_static_btn)
-        
-        self.set_dhcp_btn = ttk.Button(button_frame, text="设置DHCP", 
-                                      command=self.set_dhcp, width=12, style='DHCP.TButton')
-        self.set_dhcp_btn.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
-        self.add_button_hover_effect(self.set_dhcp_btn)
-        
-        # 操作按钮 - 第二行
-        self.refresh_ip_btn = ttk.Button(button_frame, text="刷新", 
-                                        command=self.refresh_ip_info, width=12, style='RefreshInfo.TButton')
-        self.refresh_ip_btn.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
-        self.add_button_hover_effect(self.refresh_ip_btn)
-        
-        self.export_btn = ttk.Button(button_frame, text="导出配置", 
-                                    command=self.export_config, width=12, style='Export.TButton')
-        self.export_btn.grid(row=1, column=1, padx=3, pady=3, sticky=tk.W)
-        self.add_button_hover_effect(self.export_btn)
-        
-        # 网卡控制按钮框架
-        adapter_control_frame = ttk.LabelFrame(right_frame, text="网卡控制", padding="5")
-        adapter_control_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
+
+        # 在“额外IP地址”页底部加入同样的操作区
+        actions2 = build_ip_actions(tab_extra)
+        actions2.grid(row=2, column=0, sticky=(tk.W, tk.E))
+
+        # Tab3: 网卡控制
+        tab_adapter = ttk.Frame(notebook)
+        notebook.add(tab_adapter, text="网卡控制")
+        # Tab4: 工具（分组展示，更整洁）
+        tab_tools = ttk.Frame(notebook)
+        notebook.add(tab_tools, text="工具")
+        tab_tools.columnconfigure(0, weight=1)
+        tab_tools.columnconfigure(1, weight=1)
+
+        # 分组1：网络诊断
+        diag_group = ttk.Labelframe(tab_tools, text="网络诊断", padding=8)
+        diag_group.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=4, pady=(8, 4))
+        diag_group.columnconfigure(1, weight=1)
+
+        ttk.Label(diag_group, text="内网测试（网关）").grid(row=0, column=0, sticky=tk.E, padx=(0,8), pady=4)
+        lan_entry = ttk.Entry(diag_group, textvariable=self.lan_ping_target, width=28)
+        lan_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=4)
+        lan_btn = ttk.Button(diag_group, text="内网测试 (ping)", style='Ping.TButton',
+                             command=lambda: self.run_ping(self.lan_ping_target.get()))
+        lan_btn.grid(row=0, column=2, sticky=tk.W, padx=(8,0), pady=4)
+
+        ttk.Label(diag_group, text="网络测试（外网）").grid(row=1, column=0, sticky=tk.E, padx=(0,8), pady=4)
+        self.ping_target = tk.StringVar(value="www.baidu.com")
+        ping_entry = ttk.Entry(diag_group, textvariable=self.ping_target, width=28)
+        ping_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=4)
+        ping_btn = ttk.Button(diag_group, text="网络测试 (ping)", style='Ping.TButton',
+                              command=lambda: self.run_ping(self.ping_target.get()))
+        ping_btn.grid(row=1, column=2, sticky=tk.W, padx=(8,0), pady=4)
+
+        # 网络追踪（tracert）
+        ttk.Label(diag_group, text="网络追踪（tracert）").grid(row=2, column=0, sticky=tk.E, padx=(0,8), pady=4)
+        self.tracert_target = tk.StringVar(value="www.baidu.com")
+        tracert_entry = ttk.Entry(diag_group, textvariable=self.tracert_target, width=28)
+        tracert_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=4)
+        tracert_btn = ttk.Button(diag_group, text="网络追踪 (tracert)", style='Ping.TButton',
+                                 command=lambda: self.run_tracert(self.tracert_target.get()))
+        tracert_btn.grid(row=2, column=2, sticky=tk.W, padx=(8,0), pady=4)
+
+        # 分组2：系统工具
+        sys_group = ttk.Labelframe(tab_tools, text="系统工具", padding=8)
+        sys_group.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=4, pady=(4, 8))
+        for i in range(3):
+            sys_group.columnconfigure(i, weight=1)
+
+        ttk.Button(sys_group, text="刷新DNS", command=self.flush_dns_cache).grid(row=0, column=0, sticky=tk.EW, padx=2, pady=4)
+        ttk.Button(sys_group, text="IP释放", command=self.ip_release).grid(row=0, column=1, sticky=tk.EW, padx=2, pady=4)
+        ttk.Button(sys_group, text="IP续租", command=self.ip_renew).grid(row=0, column=2, sticky=tk.EW, padx=2, pady=4)
+
+        ttk.Button(sys_group, text="Winsock重置", style='Reset.TButton', command=self.winsock_reset_quick).grid(row=1, column=0, sticky=tk.EW, padx=2, pady=4)
+        ttk.Button(sys_group, text="打开防火墙ping", command=self.enable_firewall_ping).grid(row=1, column=1, sticky=tk.EW, padx=2, pady=4)
+        ttk.Button(sys_group, text="关闭防火墙ping", command=self.disable_firewall_ping).grid(row=1, column=2, sticky=tk.EW, padx=2, pady=4)
+
+        # Win11 自动登录开关
+        ttk.Button(sys_group, text="Win11自动登录开关", command=self.toggle_win11_autologon).grid(row=2, column=0, sticky=tk.EW, padx=2, pady=4)
+        ttk.Button(sys_group, text="一键清理浏览器缓存 - Edge/360极速/Chrome", command=self.clear_browser_cache).grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=2, pady=4)
+        adapter_control_frame = ttk.LabelFrame(tab_adapter, text="网卡控制", padding="5")
+        adapter_control_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
         adapter_control_frame.columnconfigure(0, weight=1)
         adapter_control_frame.columnconfigure(1, weight=1)
-        
-        # 网卡控制按钮 - 第一行
+
         self.disable_btn = ttk.Button(adapter_control_frame, text="禁用网卡", 
                                      command=self.disable_adapter, width=12, style='Disable.TButton')
         self.disable_btn.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
         self.add_button_hover_effect(self.disable_btn)
-        
+
         self.enable_btn = ttk.Button(adapter_control_frame, text="启用网卡", 
                                     command=self.enable_adapter, width=12, style='Enable.TButton')
         self.enable_btn.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
         self.add_button_hover_effect(self.enable_btn)
-        
-        # 网卡控制按钮 - 第二行
+
         self.reset_network_btn = ttk.Button(adapter_control_frame, text="重置网络", 
                                            command=self.reset_network, width=12, style='Reset.TButton')
         self.reset_network_btn.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
@@ -537,6 +1083,12 @@ class IPManager:
             if nic:
                 self.display_wmi_ip_info(nic, adapter)
                 self.status_var.set("IP信息已更新")
+                # 更新内网测试目标（默认取第一个网关）
+                try:
+                    if hasattr(self, 'lan_ping_target') and hasattr(nic, 'DefaultIPGateway') and nic.DefaultIPGateway:
+                        self.lan_ping_target.set(str(nic.DefaultIPGateway[0]))
+                except Exception:
+                    pass
             else:
                 # 即使没有配置信息，也显示基本的网卡信息
                 self.display_adapter_info(adapter)
@@ -1497,14 +2049,75 @@ def main():
         messagebox.showerror("错误", "此程序仅支持Windows系统")
         return
     
-    # 检查管理员权限
-    if not is_admin():
-        messagebox.showwarning("权限警告", 
-                             "程序需要管理员权限才能执行某些操作。\n\n"
-                             "建议以管理员身份运行此程序，以确保所有功能正常工作。\n\n"
-                             "某些功能（如网络重置、网卡控制）可能需要管理员权限。")
+    # 启动时尝试申请管理员权限（UAC），避免后续操作失败
+    try:
+        # 标记位，避免重复提权循环
+        elevated_flag = "--elevated"
+        if elevated_flag in sys.argv:
+            # 清理掉标记，避免影响后续参数处理
+            sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != elevated_flag]
+        elif not is_admin():
+            import ctypes
+            # 组装提权启动参数
+            if getattr(sys, 'frozen', False):
+                # 打包后的exe，直接以自身提权
+                exe_path = sys.executable
+                params = " ".join(sys.argv[1:] + [elevated_flag])
+            else:
+                # 脚本运行，使用python解释器提权执行当前脚本
+                exe_path = sys.executable
+                script_path = os.path.abspath(__file__)
+                params = f'"{script_path}" ' + " ".join(sys.argv[1:] + [elevated_flag])
+            rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_path, params, None, 1)
+            if rc > 32:
+                # 成功启动了提权进程，退出当前普通权限进程
+                return
+    except Exception:
+        # 忽略提权异常，继续以普通权限运行（关键操作前仍会有提示）
+        pass
     
     root = tk.Tk()
+    # 全局苹果风样式：更圆的控件、浅灰背景、细分隔
+    try:
+        style = ttk.Style()
+        style.theme_use('clam')
+        # 主题主色：浅绿背景 + macOS 蓝色按钮
+        PRIMARY_BG = '#ECFDF5'   # 浅绿（柔和）
+        PRIMARY_FG = '#222'
+        ACCENT = '#0A84FF'       # macOS 蓝
+        ACCENT_HOVER = '#0063E1'
+        ACCENT_PRESSED = '#0052BF'
+        SUBTLE = '#6B7280'
+
+        # 全局字体（苹果风：SF Pro 替补为 Segoe UI / Arial）
+        try:
+            base_font = tkfont.Font(family='SF Pro Text', size=11)
+            title_font = tkfont.Font(family='SF Pro Display', size=18, weight='bold')
+        except Exception:
+            base_font = tkfont.Font(family='Segoe UI', size=11)
+            title_font = tkfont.Font(family='Segoe UI', size=18, weight='bold')
+
+        root.option_add('*Font', base_font)
+
+        # 窗体背景与分隔色
+        root.configure(bg=PRIMARY_BG)
+        style.configure('.', background=PRIMARY_BG)
+        style.configure('TFrame', background=PRIMARY_BG)
+        style.configure('TLabelframe', background=PRIMARY_BG, borderwidth=1, relief='groove')
+        style.configure('TLabelframe.Label', background=PRIMARY_BG, foreground=SUBTLE, padding=2)
+        style.configure('TLabel', background=PRIMARY_BG, foreground=PRIMARY_FG)
+        # 圆角模拟：给分组框和文本框添加更柔的外观（Tk本身不支持真正圆角，采用留白与内边距权衡）
+        # 输入类控件圆角感（通过内边距和浅边框模拟）
+        style.configure('TEntry', padding=6, fieldbackground="#FFFFFF")
+        style.configure('TCombobox', padding=4, fieldbackground="#FFFFFF")
+        # 按钮扁平浅色与悬停
+        # 基础按钮统一为macOS蓝
+        style.configure('TButton', padding=(10, 6), relief='flat', background=ACCENT, foreground='#FFFFFF', borderwidth=0)
+        style.map('TButton',
+                  background=[('active', ACCENT_HOVER), ('pressed', ACCENT_PRESSED)],
+                  relief=[('pressed', 'sunken')])
+    except Exception:
+        pass
     app = IPManager(root)
     
     # 设置窗口图标（如果有的话）
