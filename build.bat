@@ -1,59 +1,63 @@
 @echo off
 chcp 65001 >nul
-title IP管理器构建工具
+title IP Manager Build Tool
 
 echo ========================================
-echo    IP管理器 - 构建工具
+echo    IP Manager - Build Tool
 echo ========================================
 echo.
 
-:: 检查Python
+:: Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo 错误：未找到Python
+    echo Error: Python not found
     pause
     exit /b 1
 )
 
-:: 检查PyInstaller
-python -c "import PyInstaller" >nul 2>&1
-if errorlevel 1 (
-    echo 正在安装PyInstaller...
-    pip install pyinstaller
-)
-
-:: 清理旧文件
-echo 清理旧文件...
+:: Clean old files
+echo Cleaning old files...
 if exist "build" rmdir /s /q "build" 2>nul
 if exist "dist" rmdir /s /q "dist" 2>nul
 if exist "*.spec" del "*.spec" 2>nul
 
 echo.
-echo 开始构建EXE文件...
+echo Starting EXE build...
 echo.
 
-:: 构建EXE
-pyinstaller --onefile --windowed --name="IP管理器" main.py
+:: Build command
+set CMD=pyinstaller --noconfirm --clean --onefile --windowed --name="IP Manager"
+
+if exist "ip_manager.ico" (
+    set CMD=%CMD% --icon="ip_manager.ico"
+)
+if exist "ip_manager_256x256.png" (
+    set CMD=%CMD% --add-data="ip_manager_256x256.png;."
+)
+if exist "LibreHardwareMonitor" (
+    set CMD=%CMD% --add-data="LibreHardwareMonitor;LibreHardwareMonitor"
+)
+
+set CMD=%CMD% --hidden-import=clr --hidden-import=System --hidden-import=System.Threading --hidden-import=System.Collections --hidden-import=win32timezone --hidden-import=pystray --hidden-import=PIL --hidden-import=PIL.Image --hidden-import=PIL.ImageDraw
+
+echo Executing command: %CMD%
+%CMD% main.py
 
 if errorlevel 1 (
-    echo.
-    echo 构建失败！
-    pause
-    exit /b 1
+  echo.
+  echo Build failed!
+  pause
+  exit /b 1
+)
+
+if exist "dist\IP Manager.exe" (
+  copy /Y "dist\IP Manager.exe" "IP Manager.exe" >nul 2>&1
+  echo Copied to current directory: IP Manager.exe
 )
 
 echo.
-echo 构建成功！
-echo EXE文件位置: dist\IP管理器.exe
-
-:: 复制到当前目录
-copy "dist\IP管理器.exe" "IP管理器.exe" >nul 2>&1
-if %errorlevel% equ 0 (
-    echo 已复制到当前目录: IP管理器.exe
-) else (
-    echo 复制文件失败
-)
-
+echo Build successful!
+echo EXE location: dist\IP Manager.exe
 echo.
-echo 构建完成！
+echo Build completed!
 pause 

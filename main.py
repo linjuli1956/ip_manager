@@ -39,11 +39,13 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
  
-# Global theme constants (Apple-like)
-PRIMARY_BG = '#ECFDF5'  # light green background
-PRIMARY_FG = '#222'
-SUBTLE = '#6B7280'
-ACCENT = '#0A84FF'       # macOS blue
+# Global theme constants (Light, modern)
+PRIMARY_BG = '#F7FAFC'   # light background
+SURFACE_BG = '#FFFFFF'   # surface background
+SURFACE_CARD = '#FFFFFF' # card surface
+PRIMARY_FG = '#0F172A'   # dark text
+SUBTLE = '#6B7280'       # neutral gray
+ACCENT = '#0A84FF'       # blue accent
 ACCENT_HOVER = '#0063E1'
 ACCENT_PRESSED = '#0052BF'
 import subprocess
@@ -52,9 +54,22 @@ import glob
 import re
 import socket
 import threading
+import time
 from datetime import datetime
 import wmi
 import win32com.client
+import math
+import platform
+from typing import Optional, List, Tuple
+
+# 系统托盘相关
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    SYSTEM_TRAY_AVAILABLE = True
+except ImportError:
+    SYSTEM_TRAY_AVAILABLE = False
+    print("警告：pystray或PIL未安装，系统托盘功能不可用")
 
 
 
@@ -81,37 +96,112 @@ class IPManager:
     def __init__(self, root):
         self.root = root
         self.root.title("Windows IP地址管理器")
-        self.root.geometry("1024x680")  # 默认窗口大小 1024x680
+        self.root.geometry("820x750")  # 默认窗口大小调整为 820x750
         self.root.resizable(True, True)
+        
+        # 系统托盘相关变量
+        self.is_minimized_to_tray = False
+        self.tray_icon = None
+        self.first_close_asked = False  # 标记是否已经询问过第一次关闭
+        
+        # 动态缩放系统
+        self.base_width = 900  # 基准宽度
+        self.base_height = 680  # 基准高度
+        self.scale_factor = 1.0  # 缩放因子
+        
+        # 存储需要缩放的UI元素
+        self.scalable_widgets = []
+        
+        # 初始化WMI连接
+        try:
+            self.wmi = wmi.WMI()
+        except Exception as e:
+            print(f"WMI初始化失败: {e}")
+            self.wmi = None
+        
+        # 绑定窗口大小变化事件
+        self.root.bind('<Configure>', self._on_window_resize)
+        
+        # 初始化缩放因子
+        self._update_scale_factor()
+        
+        # 设置UI
+        self.setup_ui()
+        
+        # 初始化网络适配器
+        self.refresh_network_adapters()
+        
+        # 初始化硬件监控
+        self._init_lhm_bridge()
+        
+        # 绑定硬件信息页签切换事件
+        self._bind_hw_tab_events()
+        
+        # 系统托盘相关
+        self.tray_icon = None
+        self.is_minimized_to_tray = False
+        
+        # 绑定窗口关闭事件
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        
+        # 确保任务栏图标显示
+        self._ensure_taskbar_icon()
+        
+        # 初始化系统托盘
+        self._init_system_tray()
 
         # 设置应用图标（EXE与窗口内一致）
         try:
-            ico_path = resource_path("IP管理器.ico")
+            # 优先使用ico文件
+            ico_path = resource_path("ip_manager.ico")
             if os.path.exists(ico_path):
                 self.root.iconbitmap(ico_path)
-        except Exception:
-            pass
+                print(f"设置窗口图标: {ico_path}")
+            else:
+                # 备用方案：尝试其他可能的ico文件名
+                for ico_name in ["IP管理器.ico", "icon.ico", "app.ico"]:
+                    ico_path = resource_path(ico_name)
+                    if os.path.exists(ico_path):
+                        self.root.iconbitmap(ico_path)
+                        print(f"设置窗口图标: {ico_path}")
+                        break
+        except Exception as e:
+            print(f"设置ico图标失败: {e}")
 
         try:
+            # 设置PhotoImage图标（用于任务栏）
             png_path = resource_path("ip_manager_256x256.png")
             if os.path.exists(png_path):
                 # 保持引用避免被GC
                 self._icon_img = tk.PhotoImage(file=png_path)
                 self.root.iconphoto(True, self._icon_img)
-        except Exception:
-            pass
+                print(f"设置PhotoImage图标: {png_path}")
+            else:
+                # 备用方案：尝试其他尺寸的png文件
+                for size in ["512x512", "128x128", "64x64", "32x32"]:
+                    png_path = resource_path(f"ip_manager_{size}.png")
+                    if os.path.exists(png_path):
+                        self._icon_img = tk.PhotoImage(file=png_path)
+                        self.root.iconphoto(True, self._icon_img)
+                        print(f"设置PhotoImage图标: {png_path}")
+                        break
+        except Exception as e:
+            print(f"设置PhotoImage图标失败: {e}")
         
         # 设置样式
         style = ttk.Style()
         style.theme_use('clam')
         
-        # 自定义样式 - 增大字体
-        style.configure('TButton', font=('Arial', 11))
-        style.configure('TLabel', font=('Arial', 11))
-        style.configure('TEntry', font=('Arial', 11))
-        style.configure('TCombobox', font=('Arial', 11))
-        style.configure('TLabelframe', font=('Arial', 11, 'bold'))
-        style.configure('TLabelframe.Label', font=('Arial', 11, 'bold'))
+        # 自定义样式 - 科技风配色
+        style.configure('.', background=PRIMARY_BG, foreground=PRIMARY_FG)
+        style.configure('TFrame', background=PRIMARY_BG)
+        style.configure('TLabel', background=PRIMARY_BG, foreground=PRIMARY_FG, font=('Segoe UI', 11))
+        style.configure('TLabelframe', background=PRIMARY_BG, borderwidth=1, relief='groove')
+        style.configure('TLabelframe.Label', background=PRIMARY_BG, foreground=SUBTLE, font=('Segoe UI', 11, 'bold'))
+        style.configure('TEntry', padding=6, fieldbackground='#FFFFFF')
+        style.configure('TCombobox', padding=4, fieldbackground='#FFFFFF')
+        style.configure('TButton', padding=(12, 7), relief='flat', background=ACCENT, foreground='#FFFFFF', font=('Segoe UI', 11, 'bold'))
+        style.map('TButton', background=[('active', ACCENT_HOVER), ('pressed', ACCENT_PRESSED)])
         
         # 自定义按钮样式 - 增大字体并添加悬停效果
         # 刷新按钮 - 绿色，悬停时稍微变亮
@@ -181,7 +271,7 @@ class IPManager:
         style.configure('Ping.TButton', font=('Arial', 11), background='#0A84FF', foreground='white')
         
         # 状态栏样式
-        style.configure('Status.TLabel', font=('Arial', 11), background='#E3F2FD', foreground='#1976D2')
+        style.configure('Status.TLabel', font=('Segoe UI', 10), background='#E6F0FF', foreground='#0A84FF')
         
         # 初始化WMI
         self.wmi = None
@@ -192,6 +282,15 @@ class IPManager:
             messagebox.showerror("错误", f"WMI初始化失败: {str(e)}\n\n请确保以管理员身份运行程序。")
             # 继续创建UI，但禁用需要WMI的功能
         
+        # OHM（可选，用于温度）
+        self.ohm = None
+        try:
+            self._init_ohm_bridge()
+        except Exception:
+            self.ohm = None
+
+        self._brand_images = {}
+
         self.setup_ui()
         
         # 只有在WMI初始化成功时才刷新网络适配器
@@ -371,6 +470,22 @@ class IPManager:
         except Exception as e:
             return 1, "", str(e)
 
+    def _run_args_text(self, args: list) -> tuple[int, str, str]:
+        """以参数列表方式执行命令，避免转义问题。返回 (returncode, stdout, stderr)。"""
+        try:
+            result = subprocess.run(
+                args,
+                shell=False,
+                capture_output=True,
+                text=True,
+                encoding='gbk',
+                errors='ignore',
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            return int(result.returncode), result.stdout or "", result.stderr or ""
+        except Exception as e:
+            return 1, "", str(e)
+
     def flush_dns_cache(self) -> None:
         """刷新DNS缓存。"""
         self.status_var.set("正在刷新DNS缓存…")
@@ -430,9 +545,80 @@ class IPManager:
             self.status_var.set("Winsock 重置失败")
             messagebox.showwarning("提示", "Winsock 重置失败，可能需要以管理员身份运行。")
 
+    def enable_rdp_and_set_password(self) -> None:
+        """一键开启远程桌面并可选设置当前本地账户密码。
+        注意：修改本地账户密码具有风险，请确认后操作；域账户/微软账户可能不适用。
+        """
+        # 1) 开启远程桌面（注册表）
+        try:
+            with winreg.ConnectRegistry(None, winreg.HKEY_LOCAL_MACHINE) as reg:
+                key_path = r"SYSTEM\CurrentControlSet\Control\Terminal Server"
+                with winreg.OpenKey(reg, key_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as k:
+                    # 0 允许远程，1 禁止远程
+                    winreg.SetValueEx(k, "fDenyTSConnections", 0, winreg.REG_DWORD, 0)
+        except PermissionError:
+            messagebox.showerror("错误", "需要管理员权限以开启远程桌面。")
+            return
+        except Exception as e:
+            messagebox.showerror("错误", f"开启远程桌面失败：{e}")
+            return
+
+        # 2) 开启防火墙 远程桌面 规则（兼容中英文组名）
+        self._run_cmd_silent('netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes')
+        self._run_cmd_silent('netsh advfirewall firewall set rule group="远程桌面" new enable=Yes')
+
+        # 3) 尝试启动远程桌面服务
+        self._run_cmd_silent('sc start TermService')
+
+        # 4) 可选设置本地用户密码
+        password = (self.rdp_password.get() if hasattr(self, 'rdp_password') else "")
+        if password:
+            if not password.strip():
+                # 密码为空：仅开启远程桌面，不改密码
+                self.status_var.set("远程桌面已开启（未修改密码）。")
+                messagebox.showinfo("提示", "密码为空：已仅开启远程桌面与防火墙放通，未修改本地账户密码。")
+                return
+            if len(password) < 4:
+                messagebox.showwarning("提示", "远程密码长度至少为4位。")
+                return
+            if '"' in password:
+                messagebox.showwarning("提示", '远程密码不得包含双引号(")字符。')
+                return
+            user_name = os.environ.get('USERNAME', '')
+            if not user_name:
+                messagebox.showwarning("提示", "无法获取当前用户名，已跳过密码设置。")
+            else:
+                if not messagebox.askyesno(
+                    "确认",
+                    f"将把本机账户 \"{user_name}\" 的登录密码改为你输入的内容。\n\n此操作具有风险，确定继续吗？"):
+                    user_name = ""
+                if user_name:
+                    # 使用 net user 修改本地账户密码
+                    # 注意：对于微软账户/域账户可能不适用
+                    rc, out, err = self._run_args_text(['net', 'user', user_name, password])
+                    if rc != 0:
+                        messagebox.showwarning(
+                            "提示",
+                            "修改密码可能失败：\n"
+                            "- 请确认使用的是本地账户（非微软/域账户）\n"
+                            "- 密码需符合复杂性策略\n"
+                            "- 请以管理员身份运行\n\n"
+                            f"命令输出：\n{out or err}"
+                        )
+                    else:
+                        messagebox.showinfo("完成", f"已尝试修改账户 \"{user_name}\" 的密码。")
+
+        self.status_var.set("已开启远程桌面；若设置了密码，请使用该密码通过远程桌面连接。")
+        messagebox.showinfo(
+            "完成",
+            "已开启远程桌面并放通防火墙。\n\n"
+            "- 若密码为空：仅开启远程桌面，未修改本地账户密码\n"
+            "- 若设置了新密码：请使用该密码进行远程登录（微软/域账户可能无效）"
+        )
+
     def toggle_win11_autologon(self) -> None:
         """Win11 自动登录开关：
-        - 设置 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device\DevicePasswordLessBuildVersion = 0 开启可见的 netplwiz 取消密码登录
+        - 设置 HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\PasswordLess\\Device\\DevicePasswordLessBuildVersion = 0 开启可见的 netplwiz 取消密码登录
         - 设置为 2 恢复默认(隐藏)
         显示当前状态并提供切换。
         """
@@ -469,7 +655,7 @@ class IPManager:
                 pass
             messagebox.showinfo(
                 "完成",
-                "设置已应用，已为你打开 netplwiz。\n\n在弹出的窗口中取消勾选“要使用本计算机，用户必须输入用户名和密码”，并输入密码以启用开机自动登录。"
+                "设置已应用，已为你打开 netplwiz。\n\n在弹出的窗口中取消勾选\"要使用本计算机，用户必须输入用户名和密码\"，并输入密码以启用开机自动登录。"
             )
         except PermissionError:
             messagebox.showerror("错误", "写入注册表失败：权限不足。请以管理员身份运行程序。")
@@ -586,6 +772,26 @@ class IPManager:
             if not messagebox.askyesno("确认", "检测到当前未允许 ping（ICMPv4）。是否现在开启？"):
                 return
             self.enable_firewall_ping()
+
+    def open_network_control_panel(self) -> None:
+        """一键打开Windows网络控制面板"""
+        try:
+            # 使用subprocess运行ncpa.cpl命令
+            subprocess.Popen(['ncpa.cpl'], shell=True)
+            self.status_var.set("已打开网络控制面板")
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开网络控制面板：{str(e)}")
+            self.status_var.set("打开网络控制面板失败")
+
+    def open_devices_and_printers(self) -> None:
+        """一键打开Windows设备和打印机"""
+        try:
+            # 使用explorer打开设备和打印机
+            subprocess.Popen(['explorer', 'shell:::{A8A91A66-3A7D-4424-8D24-04E180695C7A}'], shell=True)
+            self.status_var.set("已打开设备和打印机")
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开设备和打印机：{str(e)}")
+            self.status_var.set("打开设备和打印机失败")
     
     def add_button_hover_effect(self, button):
         """为按钮添加鼠标悬停效果"""
@@ -603,31 +809,28 @@ class IPManager:
         main_frame = ttk.Frame(self.root, padding="8")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # 配置网格权重（左侧更宽，右侧更窄）
+        # 配置网格权重
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=4)
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(2, weight=1)
         
-        # 标题
-        title_label = ttk.Label(main_frame, text="Windows IP地址管理器", 
-                               font=("Arial", 18, "bold"))
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 5))
+        # 标题（浅色简洁，文本置中）
+        self.title_label = ttk.Label(main_frame, text='Windows IP地址管理器', font=self._get_scaled_font(18, 'bold'))
+        self.title_label.grid(row=0, column=0, columnspan=3, pady=(0, 5), sticky=tk.N)
+        self._register_scalable_widget(self.title_label, 'label', font=(18, 'bold'))
         
         # 版本号（小字体，灰色）
         version_text = f"版本: {get_version_string()}"
-        version_label = ttk.Label(main_frame, text=version_text, 
-                                 font=("Arial", 11), foreground="gray")
-        version_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
+        self.version_label = ttk.Label(main_frame, text=version_text, font=self._get_scaled_font(10), foreground=SUBTLE)
+        self.version_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
+        self._register_scalable_widget(self.version_label, 'label', font=(10, 'normal'))
 
         # 顶部：网络测试（ping）行（移动到右侧容器中显示）
         
         # 右侧区域：先创建容器（后面把适配器区放进去）
         
-        # 两列布局：左宽右窄
-        main_frame.columnconfigure(0, weight=4)
-        main_frame.columnconfigure(1, weight=1)
+        # 两列布局：左侧IP信息占一半，右侧动态缩放
+        main_frame.columnconfigure(0, weight=1)  # 左侧占一半
+        main_frame.columnconfigure(1, weight=1)  # 右侧占一半
         main_frame.rowconfigure(2, weight=1)
         
         # 左侧：当前IP信息（位于版本号下方，靠左整列）
@@ -635,9 +838,11 @@ class IPManager:
         left_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
         
         # IP信息文本框
-        self.ip_info_text = tk.Text(left_frame, height=16, width=45, state=tk.DISABLED, font=("Consolas", 11), 
-                                   bg='#F5F5F5', fg='#333333', selectbackground='#2196F3', selectforeground='white')
+        self.ip_info_text = tk.Text(left_frame, height=16, width=45, state=tk.DISABLED, font=self._get_scaled_font(11, family='Consolas'), 
+                                   bg=SURFACE_CARD, fg=PRIMARY_FG, insertbackground=PRIMARY_FG,
+                                   selectbackground=ACCENT_HOVER, selectforeground='#0B1221', relief='flat')
         self.ip_info_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self._register_scalable_widget(self.ip_info_text, 'text', width=45, height=16, font=(11, 'normal', 'Consolas'))
         
         # 滚动条
         ip_scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.ip_info_text.yview)
@@ -670,10 +875,12 @@ class IPManager:
         )
         self.adapter_combo.grid(row=1, column=0, sticky=(tk.E, tk.W), pady=(2, 0))
         self.adapter_combo.bind('<<ComboboxSelected>>', self.on_adapter_selected)
+        self._register_scalable_widget(self.adapter_combo, 'combobox', width=45)
         # 右侧放置刷新按钮
-        refresh_btn = ttk.Button(adapter_section, text="刷新", command=self.refresh_network_adapters, width=8, style='Refresh.TButton')
+        refresh_btn = ttk.Button(adapter_section, text="刷新", command=self.refresh_network_adapters, width=int(8 * self.scale_factor), style='Refresh.TButton')
         refresh_btn.grid(row=1, column=1, sticky=tk.E, padx=(6, 0))
         self.add_button_hover_effect(refresh_btn)
+        self._register_scalable_widget(refresh_btn, 'button', width=8)
 
         # 自定义工具栏
 
@@ -697,6 +904,21 @@ class IPManager:
         # Notebook 与自定义工具栏
         notebook = ttk.Notebook(right_frame)
         notebook.grid(row=3, column=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        
+        # 设置notebook选项卡样式 - 确保文字居中
+        try:
+            style_notebook = ttk.Style()
+            style_notebook.configure('TNotebook.Tab', 
+                                   padding=(12, 6),
+                                   font=('Segoe UI', 11),
+                                   anchor='center',
+                                   justify='center')
+            style_notebook.map('TNotebook.Tab',
+                             background=[('selected', '#E3F2FD'), ('active', '#F5F5F5')],
+                             foreground=[('selected', '#1976D2'), ('active', '#424242')])
+        except Exception:
+            pass
+        
         # 隐藏Notebook默认页签，避免与自定义工具栏重复
         try:
             style_hide = ttk.Style()
@@ -705,29 +927,78 @@ class IPManager:
             pass
         toolbar = ttk.Frame(right_frame)
         toolbar.grid(row=2, column=0, sticky=tk.E, pady=(0, 6))
-        # 苹果风：分段按钮（Segmented）样式
+        # 配置toolbar的列权重，确保按钮均匀分布
+        for i in range(5):  # 5个按钮
+            toolbar.columnconfigure(i, weight=1)
+        # 科技风：分段按钮（Segmented）样式
         seg_style = ttk.Style()
-        seg_style.configure('Segment.TButton', padding=(10, 6), relief='flat',
-                            background='#D1FAE5', foreground='#222')
+        button_padding = (int(10 * self.scale_factor), int(6 * self.scale_factor))
+        seg_style.configure('Segment.TButton', 
+                           padding=button_padding, 
+                           relief='flat',
+                           background='#1F2937', 
+                           foreground='#E5E7EB',
+                           anchor='center',  # 设置文字居中对齐
+                           justify='center')  # 设置文本居中对齐
         seg_style.map('Segment.TButton',
-                      background=[('active', '#A7F3D0'), ('pressed', '#6EE7B7')])
-        seg_style.configure('SegmentSelected.TButton', padding=(10, 6), relief='flat',
-                            background=ACCENT, foreground='#FFFFFF')
+                      background=[('active', '#0EA5E9'), ('pressed', '#06B6D4')],
+                      foreground=[('active', '#0B1221'), ('pressed', '#0B1221')])
+        seg_style.configure('SegmentSelected.TButton', 
+                           padding=button_padding, 
+                           relief='flat',
+                           background=ACCENT, 
+                           foreground='#0B1221',
+                           anchor='center',  # 设置文字居中对齐
+                           justify='center')  # 设置文本居中对齐
+
+        # 卡片与徽章样式（苹果风）
+        ui_style = ttk.Style()
+        ui_style.configure('Card.TFrame', background='#FFFFFF', relief='flat')
+        ui_style.configure('CardTitle.TLabel', font=self._get_scaled_font(13, 'bold', 'Arial'), foreground='#0F172A', background='#FFFFFF')
+        ui_style.configure('CardItemLeft.TLabel', font=self._get_scaled_font(10), foreground='#6B7280', background='#FFFFFF')
+        ui_style.configure('CardItemRight.TLabel', font=self._get_scaled_font(10), foreground='#0F172A', background='#FFFFFF')
+        ui_style.configure('CardValue.TLabel', font=self._get_scaled_font(11, family='Consolas'), foreground='#111827', background='#FFFFFF')
+        ui_style.configure('Badge.TLabel', background='#E6F0FF', foreground='#0A84FF', padding=(6,2))
+        ui_style.configure('Subtle.TLabel', foreground=SUBTLE, background='#FFFFFF')
+        # 温度徽章样式
+        ui_style.configure('TempGreen.TLabel', background='#DEF7EC', foreground='#03543F', padding=(6,2))
+        ui_style.configure('TempYellow.TLabel', background='#FEF3C7', foreground='#92400E', padding=(6,2))
+        ui_style.configure('TempOrange.TLabel', background='#FFEDD5', foreground='#92400E', padding=(6,2))
+        ui_style.configure('TempRed.TLabel', background='#FEE2E2', foreground='#991B1B', padding=(6,2))
+        # 风扇转速徽章样式
+        ui_style.configure('FanGreen.TLabel', background='#E0F2FE', foreground='#0C4A6E', padding=(6,2))
+        ui_style.configure('FanYellow.TLabel', background='#FEF9C3', foreground='#A16207', padding=(6,2))
+        ui_style.configure('FanOrange.TLabel', background='#FFEDD5', foreground='#C2410C', padding=(6,2))
+        ui_style.configure('FanRed.TLabel', background='#FEE2E2', foreground='#B91C1C', padding=(6,2))
 
         self._seg_btns = []
         def set_segment_selection(active_idx: int) -> None:
             for idx, btn in enumerate(self._seg_btns):
                 btn.configure(style='SegmentSelected.TButton' if idx == active_idx else 'Segment.TButton')
 
+        self._current_tab_index = 0
         def switch_tab(i:int):
+            # 离开硬件页处理
+            try:
+                if hasattr(self, '_current_tab_index') and self._current_tab_index == 4:
+                    self._on_hw_tab_leave()
+            except Exception:
+                pass
             notebook.select(i)
             set_segment_selection(i)
+            self._current_tab_index = i
+            # 进入硬件页处理
+            try:
+                if i == 4:
+                    self._on_hw_tab_enter()
+            except Exception:
+                pass
 
-        # 与实际添加的四个选项卡保持一致
-        tb_texts = ["IP配置", "额外IP地址", "网卡控制", "工具"]
+        # 与实际添加的选项卡保持一致
+        tb_texts = ["IP配置", "额外IP地址", "网卡控制", "工具", "硬件信息"]
         for i, t in enumerate(tb_texts):
             b = ttk.Button(toolbar, text=t, style='Segment.TButton', command=lambda idx=i: switch_tab(idx))
-            b.grid(row=0, column=i, padx=(0 if i==0 else 2, 0))
+            b.grid(row=0, column=i, padx=(0 if i==0 else 2, 0), sticky=tk.EW)
             self._seg_btns.append(b)
         set_segment_selection(0)
 
@@ -740,27 +1011,31 @@ class IPManager:
 
         ttk.Label(main_ip_frame, text="IP地址:").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.ip_var = tk.StringVar()
-        self.ip_entry = ttk.Entry(main_ip_frame, textvariable=self.ip_var, width=22, validate='key')
+        self.ip_entry = ttk.Entry(main_ip_frame, textvariable=self.ip_var, width=int(22 * self.scale_factor), validate='key')
         self.ip_entry['validatecommand'] = (self.ip_entry.register(self.validate_ipv4_entry), '%P')
         self.ip_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
+        self._register_scalable_widget(self.ip_entry, 'entry', width=22)
 
         ttk.Label(main_ip_frame, text="子网掩码:").grid(row=1, column=0, sticky=tk.W, pady=2)
         self.mask_var = tk.StringVar()
-        self.mask_entry = ttk.Entry(main_ip_frame, textvariable=self.mask_var, width=22, validate='key')
+        self.mask_entry = ttk.Entry(main_ip_frame, textvariable=self.mask_var, width=int(22 * self.scale_factor), validate='key')
         self.mask_entry['validatecommand'] = (self.mask_entry.register(self.validate_ipv4_entry), '%P')
         self.mask_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
+        self._register_scalable_widget(self.mask_entry, 'entry', width=22)
 
         ttk.Label(main_ip_frame, text="默认网关:").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.gateway_var = tk.StringVar()
-        self.gateway_entry = ttk.Entry(main_ip_frame, textvariable=self.gateway_var, width=22, validate='key')
+        self.gateway_entry = ttk.Entry(main_ip_frame, textvariable=self.gateway_var, width=int(22 * self.scale_factor), validate='key')
         self.gateway_entry['validatecommand'] = (self.gateway_entry.register(self.validate_ipv4_entry), '%P')
         self.gateway_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
+        self._register_scalable_widget(self.gateway_entry, 'entry', width=22)
 
         ttk.Label(main_ip_frame, text="DNS服务器:").grid(row=3, column=0, sticky=tk.W, pady=2)
         self.dns_var = tk.StringVar()
-        self.dns_entry = ttk.Entry(main_ip_frame, textvariable=self.dns_var, width=22, validate='key')
+        self.dns_entry = ttk.Entry(main_ip_frame, textvariable=self.dns_var, width=int(22 * self.scale_factor), validate='key')
         self.dns_entry['validatecommand'] = (self.dns_entry.register(self.validate_ipv4_entry), '%P')
         self.dns_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 0))
+        self._register_scalable_widget(self.dns_entry, 'entry', width=22)
 
         # 构建公用操作按钮组（设置静态IP/设置DHCP/刷新/导出配置）
         def build_ip_actions(parent: tk.Widget) -> ttk.Frame:
@@ -768,25 +1043,29 @@ class IPManager:
             actions.columnconfigure(0, weight=1)
             actions.columnconfigure(1, weight=1)
 
-            btn1 = ttk.Button(actions, text="设置静态IP", command=self.set_static_ip, width=12, style='StaticIP.TButton')
+            btn1 = ttk.Button(actions, text="设置静态IP", command=self.set_static_ip, width=int(12 * self.scale_factor), style='StaticIP.TButton')
             btn1.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
             self.add_button_hover_effect(btn1)
+            self._register_scalable_widget(btn1, 'button', width=12)
 
-            btn2 = ttk.Button(actions, text="设置DHCP", command=self.set_dhcp, width=12, style='DHCP.TButton')
+            btn2 = ttk.Button(actions, text="设置DHCP", command=self.set_dhcp, width=int(12 * self.scale_factor), style='DHCP.TButton')
             btn2.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
             self.add_button_hover_effect(btn2)
+            self._register_scalable_widget(btn2, 'button', width=12)
 
-            btn3 = ttk.Button(actions, text="刷新", command=self.refresh_ip_info, width=12, style='RefreshInfo.TButton')
+            btn3 = ttk.Button(actions, text="刷新", command=self.refresh_ip_info, width=int(12 * self.scale_factor), style='RefreshInfo.TButton')
             btn3.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
             self.add_button_hover_effect(btn3)
+            self._register_scalable_widget(btn3, 'button', width=12)
 
-            btn4 = ttk.Button(actions, text="导出配置", command=self.export_config, width=12, style='Export.TButton')
+            btn4 = ttk.Button(actions, text="导出配置", command=self.export_config, width=int(12 * self.scale_factor), style='Export.TButton')
             btn4.grid(row=1, column=1, padx=3, pady=3, sticky=tk.W)
             self.add_button_hover_effect(btn4)
+            self._register_scalable_widget(btn4, 'button', width=12)
 
             return actions
 
-        # 在“IP配置”页底部加入操作区
+        # 在"IP配置"页底部加入操作区
         actions1 = build_ip_actions(tab_ipcfg)
         actions1.grid(row=1, column=0, sticky=(tk.W, tk.E))
 
@@ -806,15 +1085,17 @@ class IPManager:
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
 
-        add_ip_btn = ttk.Button(btn_frame, text="添加IP", command=self.add_extra_ip, width=10, style='AddIP.TButton')
+        add_ip_btn = ttk.Button(btn_frame, text="添加IP", command=self.add_extra_ip, width=int(10 * self.scale_factor), style='AddIP.TButton')
         add_ip_btn.grid(row=0, column=0, padx=2, pady=2, sticky=tk.E)
         self.add_button_hover_effect(add_ip_btn)
+        self._register_scalable_widget(add_ip_btn, 'button', width=10)
 
-        clear_ip_btn = ttk.Button(btn_frame, text="清空", command=self.clear_extra_ips, width=10, style='Clear.TButton')
+        clear_ip_btn = ttk.Button(btn_frame, text="清空", command=self.clear_extra_ips, width=int(10 * self.scale_factor), style='Clear.TButton')
         clear_ip_btn.grid(row=0, column=1, padx=2, pady=2, sticky=tk.W)
         self.add_button_hover_effect(clear_ip_btn)
+        self._register_scalable_widget(clear_ip_btn, 'button', width=10)
 
-        # 在“额外IP地址”页底部加入同样的操作区
+        # 在"额外IP地址"页底部加入同样的操作区
         actions2 = build_ip_actions(tab_extra)
         actions2.grid(row=2, column=0, sticky=(tk.W, tk.E))
 
@@ -825,39 +1106,141 @@ class IPManager:
         tab_tools = ttk.Frame(notebook)
         notebook.add(tab_tools, text="工具")
         tab_tools.columnconfigure(0, weight=1)
-        tab_tools.columnconfigure(1, weight=1)
+        tab_tools.rowconfigure(0, weight=1)
+
+        # 为工具区域创建可滚动容器
+        tools_canvas = tk.Canvas(tab_tools, highlightthickness=0, bg=PRIMARY_BG)
+        tools_canvas.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        tools_scrollbar = ttk.Scrollbar(tab_tools, orient=tk.VERTICAL, command=tools_canvas.yview)
+        tools_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        tools_canvas.configure(yscrollcommand=tools_scrollbar.set)
+        
+        # 绑定鼠标滚轮事件
+        def _on_tools_mousewheel(event):
+            try:
+                delta = -1 * int(event.delta/120) if event.delta else (1 if event.num==5 else -1)
+                tools_canvas.yview_scroll(delta, 'units')
+            except Exception:
+                pass
+            return 'break'
+        tools_canvas.bind('<MouseWheel>', _on_tools_mousewheel)
+        tools_canvas.bind('<Button-4>', _on_tools_mousewheel)
+        tools_canvas.bind('<Button-5>', _on_tools_mousewheel)
+        tools_canvas.configure(xscrollincrement=0, yscrollincrement=20)
+
+        # 创建工具内容框架
+        tools_content_frame = ttk.Frame(tools_canvas, style='TFrame')
+        tools_window = tools_canvas.create_window((0,0), window=tools_content_frame, anchor='nw')
+        
+        # 配置工具内容框架的列权重
+        tools_content_frame.columnconfigure(0, weight=1)
+        tools_content_frame.columnconfigure(1, weight=1)
+        
+        def _on_tools_frame_configure(event):
+            tools_canvas.configure(scrollregion=tools_canvas.bbox("all"))
+        tools_content_frame.bind('<Configure>', _on_tools_frame_configure)
+
+        # Tab5: 硬件信息
+        tab_hw = ttk.Frame(notebook)
+        notebook.add(tab_hw, text="硬件信息")
+        tab_hw.columnconfigure(0, weight=1)
+        tab_hw.rowconfigure(0, weight=0)
+        tab_hw.rowconfigure(1, weight=1)
+
+        # 顶部控制条：实时刷新 + 刷新间隔 + 手动刷新
+        ctrl_bar = ttk.Frame(tab_hw)
+        ctrl_bar.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0,6))
+        self.hw_live_enabled_var = tk.BooleanVar(value=False)
+        self.hw_refresh_interval_var = tk.IntVar(value=2)
+        self._hw_live_job_id = None
+        ttk.Checkbutton(ctrl_bar, text="实时刷新", variable=self.hw_live_enabled_var,
+                        command=lambda: self._toggle_hw_live()).pack(side=tk.LEFT)
+        ttk.Label(ctrl_bar, text="间隔").pack(side=tk.LEFT, padx=(12,4))
+        self.hw_interval_combo = ttk.Combobox(ctrl_bar, state='readonly', width=6,
+                                              values=["1s", "2s", "5s", "10s"])
+        self.hw_interval_combo.set("2s")
+        def _on_interval_change(event=None):
+            text = self.hw_interval_combo.get().replace('s','')
+            try:
+                self.hw_refresh_interval_var.set(int(text))
+            except Exception:
+                self.hw_refresh_interval_var.set(2)
+        self.hw_interval_combo.bind('<<ComboboxSelected>>', _on_interval_change)
+        self.hw_interval_combo.pack(side=tk.LEFT)
+        self._register_scalable_widget(self.hw_interval_combo, 'combobox', width=6)
+        copy_btn = ttk.Button(ctrl_bar, text="复制信息", command=self.copy_all_hardware_info)
+        copy_btn.pack(side=tk.RIGHT, padx=(8,0))
+        self._register_scalable_widget(copy_btn, 'button')
+        
+        refresh_btn = ttk.Button(ctrl_bar, text="立即刷新", command=self.refresh_hardware_info, style='RefreshInfo.TButton')
+        refresh_btn.pack(side=tk.RIGHT)
+        self._register_scalable_widget(refresh_btn, 'button')
+
+        # 可滚动容器（Canvas + Frame）
+        self.hw_canvas = tk.Canvas(tab_hw, highlightthickness=0, bg=PRIMARY_BG)
+        self.hw_canvas.grid(row=1, column=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        hw_scrollbar = ttk.Scrollbar(tab_hw, orient=tk.VERTICAL, command=self.hw_canvas.yview)
+        hw_scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
+        self.hw_canvas.configure(yscrollcommand=hw_scrollbar.set)
+        # 绑定鼠标滚轮与拖动事件
+        def _on_mousewheel(event):
+            try:
+                delta = -1 * int(event.delta/120) if event.delta else (1 if event.num==5 else -1)
+                self.hw_canvas.yview_scroll(delta, 'units')
+            except Exception:
+                pass
+            return 'break'
+        self.hw_canvas.bind_all('<MouseWheel>', _on_mousewheel)
+        self.hw_canvas.bind_all('<Button-4>', _on_mousewheel)
+        self.hw_canvas.bind_all('<Button-5>', _on_mousewheel)
+        self.hw_canvas.configure(xscrollincrement=0, yscrollincrement=20)
+
+        self.hw_cards_frame = ttk.Frame(self.hw_canvas, style='TFrame')
+        self.hw_window = self.hw_canvas.create_window((0,0), window=self.hw_cards_frame, anchor='nw')
+
+        def _on_frame_configure(event):
+            self._update_hw_scrollregion()
+        self.hw_cards_frame.bind('<Configure>', _on_frame_configure)
+
+        # 底部按钮条移除（已合并至顶部控制条）
 
         # 分组1：网络诊断
-        diag_group = ttk.Labelframe(tab_tools, text="网络诊断", padding=8)
+        diag_group = ttk.Labelframe(tools_content_frame, text="网络诊断", padding=8)
         diag_group.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=4, pady=(8, 4))
         diag_group.columnconfigure(1, weight=1)
 
         ttk.Label(diag_group, text="内网测试（网关）").grid(row=0, column=0, sticky=tk.E, padx=(0,8), pady=4)
         lan_entry = ttk.Entry(diag_group, textvariable=self.lan_ping_target, width=28)
         lan_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=4)
+        self._register_scalable_widget(lan_entry, 'entry', width=28)
         lan_btn = ttk.Button(diag_group, text="内网测试 (ping)", style='Ping.TButton',
                              command=lambda: self.run_ping(self.lan_ping_target.get()))
         lan_btn.grid(row=0, column=2, sticky=tk.W, padx=(8,0), pady=4)
+        self._register_scalable_widget(lan_btn, 'button')
 
         ttk.Label(diag_group, text="网络测试（外网）").grid(row=1, column=0, sticky=tk.E, padx=(0,8), pady=4)
         self.ping_target = tk.StringVar(value="www.baidu.com")
         ping_entry = ttk.Entry(diag_group, textvariable=self.ping_target, width=28)
         ping_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=4)
+        self._register_scalable_widget(ping_entry, 'entry', width=28)
         ping_btn = ttk.Button(diag_group, text="网络测试 (ping)", style='Ping.TButton',
                               command=lambda: self.run_ping(self.ping_target.get()))
         ping_btn.grid(row=1, column=2, sticky=tk.W, padx=(8,0), pady=4)
+        self._register_scalable_widget(ping_btn, 'button')
 
         # 网络追踪（tracert）
         ttk.Label(diag_group, text="网络追踪（tracert）").grid(row=2, column=0, sticky=tk.E, padx=(0,8), pady=4)
         self.tracert_target = tk.StringVar(value="www.baidu.com")
         tracert_entry = ttk.Entry(diag_group, textvariable=self.tracert_target, width=28)
         tracert_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=4)
+        self._register_scalable_widget(tracert_entry, 'entry', width=28)
         tracert_btn = ttk.Button(diag_group, text="网络追踪 (tracert)", style='Ping.TButton',
                                  command=lambda: self.run_tracert(self.tracert_target.get()))
         tracert_btn.grid(row=2, column=2, sticky=tk.W, padx=(8,0), pady=4)
+        self._register_scalable_widget(tracert_btn, 'button')
 
         # 分组2：系统工具
-        sys_group = ttk.Labelframe(tab_tools, text="系统工具", padding=8)
+        sys_group = ttk.Labelframe(tools_content_frame, text="系统工具", padding=8)
         sys_group.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=4, pady=(4, 8))
         for i in range(3):
             sys_group.columnconfigure(i, weight=1)
@@ -873,25 +1256,57 @@ class IPManager:
         # Win11 自动登录开关
         ttk.Button(sys_group, text="Win11自动登录开关", command=self.toggle_win11_autologon).grid(row=2, column=0, sticky=tk.EW, padx=2, pady=4)
         ttk.Button(sys_group, text="一键清理浏览器缓存 - Edge/360极速/Chrome", command=self.clear_browser_cache).grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=2, pady=4)
+
+        # 分组3：远程桌面
+        rdp_group = ttk.Labelframe(tools_content_frame, text="远程桌面", padding=8)
+        rdp_group.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=4, pady=(0, 8))
+        rdp_group.columnconfigure(1, weight=1)
+        ttk.Label(rdp_group, text="远程密码").grid(row=0, column=0, sticky=tk.E, padx=(0,8))
+        self.rdp_password = tk.StringVar(value="")
+        rdp_entry = ttk.Entry(rdp_group, textvariable=self.rdp_password, width=28)
+        rdp_entry.grid(row=0, column=1, sticky=(tk.W, tk.E))
+        self._register_scalable_widget(rdp_entry, 'entry', width=28)
+        rdp_btn = ttk.Button(rdp_group, text="一键打开远程桌面", command=self.enable_rdp_and_set_password)
+        rdp_btn.grid(row=0, column=2, sticky=tk.W, padx=(8,0))
+        self._register_scalable_widget(rdp_btn, 'button')
         adapter_control_frame = ttk.LabelFrame(tab_adapter, text="网卡控制", padding="5")
         adapter_control_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 8))
+        # 配置3列布局，每列权重相等
         adapter_control_frame.columnconfigure(0, weight=1)
         adapter_control_frame.columnconfigure(1, weight=1)
+        adapter_control_frame.columnconfigure(2, weight=1)
 
+        # 第一行：禁用网卡、启用网卡、重置网络
         self.disable_btn = ttk.Button(adapter_control_frame, text="禁用网卡", 
-                                     command=self.disable_adapter, width=12, style='Disable.TButton')
-        self.disable_btn.grid(row=0, column=0, padx=3, pady=3, sticky=tk.E)
+                                     command=self.disable_adapter, width=int(12 * self.scale_factor), style='Disable.TButton')
+        self.disable_btn.grid(row=0, column=0, padx=3, pady=3, sticky=tk.EW)
         self.add_button_hover_effect(self.disable_btn)
+        self._register_scalable_widget(self.disable_btn, 'button', width=12)
 
         self.enable_btn = ttk.Button(adapter_control_frame, text="启用网卡", 
-                                    command=self.enable_adapter, width=12, style='Enable.TButton')
-        self.enable_btn.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
+                                    command=self.enable_adapter, width=int(12 * self.scale_factor), style='Enable.TButton')
+        self.enable_btn.grid(row=0, column=1, padx=3, pady=3, sticky=tk.EW)
         self.add_button_hover_effect(self.enable_btn)
+        self._register_scalable_widget(self.enable_btn, 'button', width=12)
 
         self.reset_network_btn = ttk.Button(adapter_control_frame, text="重置网络", 
-                                           command=self.reset_network, width=12, style='Reset.TButton')
-        self.reset_network_btn.grid(row=1, column=0, padx=3, pady=3, sticky=tk.E)
+                                           command=self.reset_network, width=int(12 * self.scale_factor), style='Reset.TButton')
+        self.reset_network_btn.grid(row=0, column=2, padx=3, pady=3, sticky=tk.EW)
         self.add_button_hover_effect(self.reset_network_btn)
+        self._register_scalable_widget(self.reset_network_btn, 'button', width=12)
+
+        # 第二行：网络控制面板、设备和打印机
+        self.open_ncpa_btn = ttk.Button(adapter_control_frame, text="网络控制面板", 
+                                       command=self.open_network_control_panel, width=int(15 * self.scale_factor), style='Enable.TButton')
+        self.open_ncpa_btn.grid(row=1, column=0, columnspan=2, padx=3, pady=3, sticky=tk.EW)
+        self.add_button_hover_effect(self.open_ncpa_btn)
+        self._register_scalable_widget(self.open_ncpa_btn, 'button', width=15)
+
+        self.open_devices_btn = ttk.Button(adapter_control_frame, text="设备和打印机", 
+                                          command=self.open_devices_and_printers, width=int(15 * self.scale_factor), style='Enable.TButton')
+        self.open_devices_btn.grid(row=1, column=2, padx=3, pady=3, sticky=tk.EW)
+        self.add_button_hover_effect(self.open_devices_btn)
+        self._register_scalable_widget(self.open_devices_btn, 'button', width=15)
         
         # 状态栏
         self.status_var = tk.StringVar()
@@ -903,6 +1318,720 @@ class IPManager:
         # 适配器映射
         self.adapter_map = {}
         self.wmi_adapters = {}
+        
+        # 初次加载硬件信息
+        try:
+            self.refresh_hardware_info()
+        except Exception:
+            pass
+
+    # ===== 硬件信息 =====
+    def _bytes_to_gb(self, size_bytes: int) -> str:
+        try:
+            if size_bytes is None:
+                return "未知"
+            gb = float(size_bytes) / (1024 ** 3)
+            # Windows磁盘显示通常以GiB近似为GB
+            return f"{gb:.0f} GB"
+        except Exception:
+            return "未知"
+
+    def _safe_str(self, v) -> str:
+        try:
+            if v is None:
+                return "未知"
+            s = str(v).strip()
+            return s if s else "未知"
+        except Exception:
+            return "未知"
+
+    def _get_display_info(self):
+        """获取主显示分辨率、刷新率以及物理尺寸(英寸，若可用)。"""
+        width = height = refresh = None
+        diag_inch = None
+        try:
+            vcs = self.wmi.Win32_VideoController()
+            if vcs:
+                vc = vcs[0]
+                width = getattr(vc, 'CurrentHorizontalResolution', None)
+                height = getattr(vc, 'CurrentVerticalResolution', None)
+                refresh = getattr(vc, 'CurrentRefreshRate', None)
+        except Exception:
+            pass
+        # 读取EDID尺寸
+        try:
+            wmi_wmi = wmi.WMI(namespace='root\\wmi')
+            params = wmi_wmi.WmiMonitorBasicDisplayParams()
+            if params:
+                p = params[0]
+                w_cm = getattr(p, 'MaxHorizontalImageSize', None)
+                h_cm = getattr(p, 'MaxVerticalImageSize', None)
+                if w_cm and h_cm and w_cm > 0 and h_cm > 0:
+                    diag_inch = round(math.sqrt(w_cm ** 2 + h_cm ** 2) / 2.54, 1)
+        except Exception:
+            pass
+        return width, height, refresh, diag_inch
+
+    def _decode_u16_array(self, arr) -> str:
+        try:
+            if not arr:
+                return ""
+            return ''.join(chr(x) for x in arr if isinstance(x, int) and x > 0)
+        except Exception:
+            return ""
+
+    def _get_monitors_detailed_info(self):
+        """返回监视器详细信息列表：[{name, manufacturer, serial, width_cm, height_cm, diag_inch}]"""
+        mons = []
+        try:
+            w = wmi.WMI(namespace='root\\wmi')
+            ids = {m.InstanceName: m for m in getattr(w, 'WmiMonitorID')()}
+            params = {p.InstanceName: p for p in getattr(w, 'WmiMonitorBasicDisplayParams')()}
+            for inst, mid in ids.items():
+                name = self._decode_u16_array(getattr(mid, 'UserFriendlyName', None)) or 'Unknown'
+                manu = self._decode_u16_array(getattr(mid, 'ManufacturerName', None)) or 'Unknown'
+                serial = self._decode_u16_array(getattr(mid, 'SerialNumberID', None)) or 'Unknown'
+                p = params.get(inst)
+                wcm = getattr(p, 'MaxHorizontalImageSize', None) if p else None
+                hcm = getattr(p, 'MaxVerticalImageSize', None) if p else None
+                diag = None
+                try:
+                    if wcm and hcm and wcm > 0 and hcm > 0:
+                        import math as _m
+                        diag = round((_m.sqrt(wcm**2 + hcm**2))/2.54, 1)
+                except Exception:
+                    diag = None
+                mons.append({
+                    'name': name,
+                    'manufacturer': manu,
+                    'serial': serial,
+                    'width_cm': wcm,
+                    'height_cm': hcm,
+                    'diag_inch': diag,
+                })
+        except Exception:
+            pass
+        return mons
+
+    def _clear_hw_cards(self):
+        try:
+            for child in self.hw_cards_frame.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+
+    def _add_card(self, parent: ttk.Frame, title: str, rows: List[Tuple[str, str]],
+                  title_icon: Optional[tk.PhotoImage] = None,
+                  badges: Optional[List[Tuple[str, str]]] = None,
+                  accent: Optional[str] = None):
+        card = ttk.Frame(parent, style='Card.TFrame')
+        card.pack(fill=tk.X, padx=6, pady=8)
+        # 左侧色条（科技风）
+        bar = tk.Frame(card, width=4, height=1, bg=accent or '#0EA5E9')
+        bar.pack(side=tk.LEFT, fill=tk.Y)
+        inner = ttk.Frame(card, style='Card.TFrame', padding=12)
+        inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        title_row = ttk.Frame(inner, style='Card.TFrame')
+        title_row.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        # 渐变标题（使用 Canvas 绘制）
+        gradient = tk.Canvas(title_row, height=22, highlightthickness=0, bg='#FFFFFF')
+        gradient.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # 生成渐变条
+        try:
+            g1 = accent or '#0EA5E9'
+            g2 = '#60A5FA'
+            width = 240
+            steps = 60
+            for i in range(steps):
+                r = i / (steps-1)
+                # 简单线性插值（hex -> rgb）
+                def _hex_to_rgb(h):
+                    h = h.lstrip('#')
+                    return tuple(int(h[j:j+2], 16) for j in (0,2,4))
+                def _rgb_to_hex(c):
+                    return '#%02x%02x%02x' % c
+                c1 = _hex_to_rgb(g1)
+                c2 = _hex_to_rgb(g2)
+                mix = tuple(int(c1[k]*(1-r)+c2[k]*r) for k in range(3))
+                x0 = int(i*width/steps)
+                x1 = int((i+1)*width/steps)
+                gradient.create_rectangle(x0, 0, x1, 22, outline='', fill=_rgb_to_hex(mix))
+        except Exception:
+            pass
+        # 标题文本覆盖在渐变上
+        t_holder = ttk.Frame(title_row, style='Card.TFrame')
+        t_holder.place(in_=gradient, relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+        t_inner = ttk.Frame(t_holder, style='Card.TFrame')
+        t_inner.pack(fill=tk.BOTH, expand=True)
+        if title_icon is not None:
+            ttk.Label(t_inner, image=title_icon, style='Card.TFrame').pack(side=tk.LEFT, padx=(8,6))
+        ttk.Label(t_inner, text=title, style='CardTitle.TLabel').pack(side=tk.LEFT, padx=(0,8))
+        if badges:
+            for text, style_name in badges:
+                ttk.Label(t_inner, text=text, style=style_name).pack(side=tk.LEFT, padx=(0, 8))
+        # 将行渲染为可选择的 Text（方便鼠标选择复制）
+        # 计算左列最大宽度便于对齐
+        max_left = 0
+        for l, _ in rows:
+            max_left = max(max_left, len(str(l)))
+        lines = []
+        for l, r in rows:
+            ltxt = str(l).ljust(max_left)
+            lines.append(f"{ltxt}  {r}")
+        text_widget = tk.Text(inner, height=min(12, len(lines)+1), bg=SURFACE_CARD, fg=PRIMARY_FG,
+                               font=self._get_scaled_font(11, family='Consolas'), relief='flat', borderwidth=0, highlightthickness=0,
+                               wrap='word', cursor='xterm', insertbackground=PRIMARY_FG)
+        text_widget.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        text_widget.insert('1.0', "\n".join(lines))
+        text_widget.configure(state=tk.DISABLED)
+        # 注册文本控件用于缩放
+        self._register_scalable_widget(text_widget, 'text', height=min(12, len(lines)+1), font=(11, 'normal', 'Consolas'))
+        inner.columnconfigure(0, weight=1)
+
+    def _update_hw_scrollregion(self):
+        try:
+            if hasattr(self, 'hw_canvas'):
+                self.hw_canvas.update_idletasks()
+                self.hw_canvas.configure(scrollregion=self.hw_canvas.bbox('all'))
+                if hasattr(self, 'hw_window'):
+                    self.hw_canvas.itemconfig(self.hw_window, width=self.hw_canvas.winfo_width())
+                # 不强制跳到顶部，保持用户拖动位置；仅在首次渲染后无滚动时设为0
+                if self.hw_canvas.yview() == (0.0, 1.0):
+                    self.hw_canvas.yview_moveto(0)
+        except Exception:
+            pass
+
+    # ---- 品牌图标加载（可选） ----
+    def _get_brand_icon(self, kind: str, name: str) -> Optional[tk.PhotoImage]:
+        try:
+            key = (kind, name)
+            if key in self._brand_images:
+                return self._brand_images[key]
+            brand = ""
+            n = (name or "").lower()
+            if kind == 'cpu':
+                if 'intel' in n:
+                    brand = 'intel'
+                elif 'amd' in n or 'ryzen' in n:
+                    brand = 'amd'
+            elif kind == 'gpu':
+                if 'nvidia' in n or 'geforce' in n or 'rtx' in n or 'gtx' in n:
+                    brand = 'nvidia'
+                elif 'amd' in n or 'radeon' in n:
+                    brand = 'amd'
+                elif 'intel' in n or 'uhd' in n or 'arc' in n:
+                    brand = 'intel'
+            elif kind == 'board':
+                if 'asus' in n:
+                    brand = 'asus'
+                elif 'gigabyte' in n or 'aorus' in n:
+                    brand = 'gigabyte'
+                elif 'msi' in n:
+                    brand = 'msi'
+                elif 'asrock' in n:
+                    brand = 'asrock'
+            if not brand:
+                return None
+            # 支持的查找路径
+            candidates = [
+                resource_path(f"Resources/brands/{kind}_{brand}.png"),
+                resource_path(f"Resources/brands/{brand}.png"),
+                os.path.join('Resources', 'brands', f"{kind}_{brand}.png"),
+                os.path.join('Resources', 'brands', f"{brand}.png"),
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    img = tk.PhotoImage(file=p)
+                    self._brand_images[key] = img
+                    return img
+        except Exception:
+            return None
+        return None
+
+    # ---- 温度读取（LibreHardwareMonitor，可选） ----
+    def _init_lhm_bridge(self):
+        try:
+            import clr  # type: ignore
+        except Exception:
+            self.lhm = None
+            return
+        # 搜索 LibreHardwareMonitor DLL
+        dll_candidates = [
+            resource_path('LibreHardwareMonitor/LibreHardwareMonitorLib.dll'),
+            resource_path('LibreHardwareMonitorLib.dll'),
+            os.path.join('LibreHardwareMonitor', 'LibreHardwareMonitorLib.dll'),
+        ]
+        dll_path = next((p for p in dll_candidates if os.path.exists(p)), None)
+        if not dll_path:
+            self.lhm = None
+            return
+        try:
+            import clr  # type: ignore
+            sys.path.append(os.path.dirname(dll_path))
+            clr.AddReference(os.path.basename(dll_path).replace('.dll',''))
+            from LibreHardwareMonitor.Hardware import Computer, SensorType  # type: ignore
+            comp = Computer()
+            comp.IsMotherboardEnabled = True
+            comp.IsCpuEnabled = True
+            comp.IsMemoryEnabled = True
+            comp.IsGpuEnabled = True
+            comp.IsStorageEnabled = True
+            comp.Open()
+            self.lhm = {'lib': Computer, 'computer': comp}
+        except Exception as e:
+            self.lhm = None
+
+    def _read_temperatures(self) -> dict:
+        temps: dict = {}
+        try:
+            if not self.lhm:
+                # 仅回退到 WMI(LibreHardwareMonitor)（不主动启动 EXE）
+                return self._read_temperatures_via_wmi_lhm()
+            Hardware = self.lhm['lib']
+            comp = self.lhm['computer']
+            def update_hw(hw):
+                try:
+                    hw.Update()
+                    # 子硬件
+                    for sh in hw.SubHardware:
+                        update_hw(sh)
+                    for s in hw.Sensors:
+                        if s.SensorType == Hardware.SensorType.Temperature:
+                            name = f"{hw.HardwareType}_{hw.Name}_{s.Name}"
+                            temps[name] = float(s.Value) if s.Value is not None else None
+                except Exception:
+                    pass
+            for hw in comp.Hardware:
+                update_hw(hw)
+        except Exception:
+            pass
+        return temps
+
+    def _read_lhm_metrics(self) -> dict:
+        """读取 LibreHardwareMonitor 提供的关键指标：温度与风扇。
+        返回 {'temps': {...}, 'fans': {...}}
+        """
+        temps: dict = {}
+        fans: dict = {}
+        try:
+            # 首选 DLL 方式
+            if self.lhm:
+                Computer = self.lhm['lib']
+                comp = self.lhm['computer']
+                
+                # 导入SensorType
+                from LibreHardwareMonitor.Hardware import SensorType
+                
+                # 简单的硬件更新方法
+                def update_hardware(hardware):
+                    try:
+                        hardware.Update()
+                        for subhardware in hardware.SubHardware:
+                            update_hardware(subhardware)
+                    except Exception as e:
+                        print(f"更新硬件失败: {e}")
+                
+                # 更新所有硬件数据
+                for hardware in comp.Hardware:
+                    update_hardware(hardware)
+                
+                # 遍历所有硬件和传感器
+                def collect_sensors(hardware):
+                    try:
+                        for sensor in hardware.Sensors:
+                            if sensor.SensorType == SensorType.Temperature:
+                                temps[f"{hardware.HardwareType}_{hardware.Name}_{sensor.Name}"] = float(sensor.Value) if sensor.Value is not None else None
+                            elif sensor.SensorType == SensorType.Fan:
+                                fans[f"{hardware.HardwareType}_{hardware.Name}_{sensor.Name}"] = float(sensor.Value) if sensor.Value is not None else None
+                        
+                        # 递归处理子硬件
+                        for subhardware in hardware.SubHardware:
+                            collect_sensors(subhardware)
+                    except Exception as e:
+                        print(f"收集传感器数据失败: {e}")
+                
+                for hardware in comp.Hardware:
+                    collect_sensors(hardware)
+                
+                return {'temps': temps, 'fans': fans}
+            
+            # 回退到 WMI 提供器
+            lhm_ns = wmi.WMI(namespace='root\\LibreHardwareMonitorLib')
+            for sensor in lhm_ns.Sensor():
+                try:
+                    st = getattr(sensor, 'SensorType', '').lower()
+                    name = f"{getattr(sensor, 'HardwareType', '')}_{getattr(sensor, 'Hardware', '')}_{getattr(sensor, 'Name', '')}"
+                    val = getattr(sensor, 'Value', None)
+                    if val is None:
+                        continue
+                    if st == 'temperature':
+                        temps[name] = float(val)
+                    elif st == 'fan':
+                        fans[name] = float(val)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"读取LibreHardwareMonitor指标失败: {e}")
+        return {'temps': temps, 'fans': fans}
+
+    def _read_temperatures_via_wmi_lhm(self) -> dict:
+        """通过 LibreHardwareMonitor 的 WMI 提供器读取温度（无需 pythonnet）。"""
+        result = {}
+        try:
+            lhm_ns = wmi.WMI(namespace='root\\LibreHardwareMonitorLib')
+            for sensor in lhm_ns.Sensor():
+                try:
+                    if getattr(sensor, 'SensorType', '').lower() == 'temperature':
+                        name = f"{getattr(sensor, 'HardwareType', '')}_{getattr(sensor, 'Hardware', '')}_{getattr(sensor, 'Name', '')}"
+                        val = getattr(sensor, 'Value', None)
+                        if val is not None:
+                            result[name] = float(val)
+                except Exception:
+                    pass
+        except Exception:
+            return {}
+        return result
+
+    def _start_lhm_background(self) -> None:
+        """尝试无窗口启动 LibreHardwareMonitor.exe（若存在）。"""
+        try:
+            candidates = [
+                resource_path('LibreHardwareMonitor/LibreHardwareMonitor.exe'),
+                os.path.join('LibreHardwareMonitor', 'LibreHardwareMonitor.exe'),
+            ]
+            exe = next((p for p in candidates if os.path.exists(p)), None)
+            if not exe:
+                return
+            # 已有进程则略过
+            try:
+                # Windows: tasklist 过滤
+                rc = subprocess.run('tasklist | findstr /I "LibreHardwareMonitor.exe"', shell=True,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if rc.returncode == 0:
+                    return
+            except Exception:
+                pass
+            subprocess.Popen(f'"{exe}" /minimized', shell=True,
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except Exception:
+            pass
+
+    def _pick_temp(self, temps: dict, prefer_keys: List[str]) -> Optional[float]:
+        for k in prefer_keys:
+            # 模糊匹配
+            for name, v in temps.items():
+                if k.lower() in name.lower() and v is not None:
+                    return float(v)
+        return None
+
+    def _pick_fan(self, fans: dict, prefer_keys: List[str]) -> Optional[float]:
+        for k in prefer_keys:
+            for name, v in fans.items():
+                if k.lower() in name.lower() and v is not None:
+                    return float(v)
+        return None
+
+    def _temp_badge(self, value: Optional[float]) -> Optional[Tuple[str, str]]:
+        if value is None:
+            return None
+        t = float(value)
+        if t < 60:
+            style = 'TempGreen.TLabel'
+        elif t < 75:
+            style = 'TempYellow.TLabel'
+        elif t < 85:
+            style = 'TempOrange.TLabel'
+        else:
+            style = 'TempRed.TLabel'
+        return (f"{t:.0f}℃", style)
+
+    def _fan_badge(self, value: Optional[float]) -> Optional[Tuple[str, str]]:
+        if value is None:
+            return None
+        f = float(value)
+        if f < 800:
+            style = 'FanGreen.TLabel'
+        elif f < 1500:
+            style = 'FanYellow.TLabel'
+        elif f < 2500:
+            style = 'FanOrange.TLabel'
+        else:
+            style = 'FanRed.TLabel'
+        return (f"{f:.0f} RPM", style)
+
+    def refresh_hardware_info(self) -> None:
+        """刷新并展示硬件信息（卡片式UI）。"""
+        try:
+            if not self.wmi:
+                self.wmi = wmi.WMI()
+        except Exception:
+            pass
+        # 清空旧卡片
+        self._clear_hw_cards()
+
+        # 采集温度/风扇（若可用）
+        temps = {}
+        fans = {}
+        try:
+            metrics = self._read_lhm_metrics()
+            temps = metrics.get('temps', {})
+            fans = metrics.get('fans', {})
+        except Exception:
+            temps, fans = {}, {}
+
+        # CPU
+        try:
+            cpus = self.wmi.Win32_Processor()
+            if cpus:
+                cpu = cpus[0]
+                name = self._safe_str(cpu.Name)
+                cores = getattr(cpu, 'NumberOfCores', None)
+                threads = getattr(cpu, 'NumberOfLogicalProcessors', None)
+                mhz = getattr(cpu, 'MaxClockSpeed', None)
+                ghz_str = f"{(mhz or 0)/1000:.1f}GHz" if mhz else "未知频率"
+                rows = [("型号", name), ("频率", ghz_str), ("核心/线程", f"{cores or '未知'} / {threads or '未知'}")]
+                cpu_temp = self._pick_temp(temps, ["CPU Package", "CPU Core", "CPU", "Tdie", "CCD"])
+                if cpu_temp is not None:
+                    rows.append(("温度", f"{cpu_temp:.0f}℃"))
+                cpu_fan = self._pick_fan(fans, ["CPU", "Processor", "PUMP", "Fan #1", "Fan #2", "Fan #3", "Fan #4", "Fan #5", "Fan #6"])  # 可能读到水泵转速
+                if cpu_fan is not None:
+                    rows.append(("风扇", f"{cpu_fan:.0f} RPM"))
+                temp_badge = self._temp_badge(cpu_temp)
+                fan_badge = self._fan_badge(cpu_fan)
+                badges = []
+                if temp_badge:
+                    badges.append(temp_badge)
+                if fan_badge:
+                    badges.append(fan_badge)
+                self._add_card(self.hw_cards_frame, "处理器", rows,
+                               title_icon=self._get_brand_icon('cpu', name),
+                               badges=badges if badges else None,
+                               accent='#3B82F6')
+        except Exception:
+            pass
+
+        # GPU
+        try:
+            gpus = self.wmi.Win32_VideoController()
+            if gpus:
+                rows = []
+                for idx, gpu in enumerate(gpus, 1):
+                    gname = self._safe_str(gpu.Name)
+                    vram = getattr(gpu, 'AdapterRAM', None)
+                    vram_str = self._bytes_to_gb(vram) if vram else ""
+                    label = f"显卡{idx}" if len(gpus) > 1 else "显卡"
+                    gtemp = self._pick_temp(temps, ["GPU Hot Spot", "GPU Core", "GPU", gname])
+                    info = f"{gname}{('（显存 '+vram_str+'）') if vram_str else ''}"
+                    if gtemp is not None:
+                        info += f"  温度 {gtemp:.0f}℃"
+                    gfan = self._pick_fan(fans, ["GPU", gname])
+                    if gfan is not None:
+                        info += f"  风扇 {gfan:.0f} RPM"
+                    rows.append((label, info))
+                # 显卡温度和风扇徽章（展示第一张卡的数据为主）
+                gpu_temp = self._pick_temp(temps, ["GPU Core", "GPU", "GPU Hot Spot"])
+                gpu_fan = self._pick_fan(fans, ["GPU", "GPU Fan", "GPU Core Fan"])
+                temp_badge = self._temp_badge(gpu_temp)
+                fan_badge = self._fan_badge(gpu_fan)
+                badges = []
+                if temp_badge:
+                    badges.append(temp_badge)
+                if fan_badge:
+                    badges.append(fan_badge)
+                icon = self._get_brand_icon('gpu', gpus[0].Name if gpus else '')
+                self._add_card(self.hw_cards_frame, "显卡", rows,
+                               title_icon=icon,
+                               badges=badges if badges else None,
+                               accent='#10B981')
+        except Exception:
+            pass
+
+        # 内存
+        try:
+            mems = self.wmi.Win32_PhysicalMemory()
+            if mems:
+                total = 0
+                speeds = set()
+                rows = []
+                for m in mems:
+                    cap = int(getattr(m, 'Capacity', 0) or 0)
+                    total += cap
+                    speed = getattr(m, 'ConfiguredClockSpeed', None) or getattr(m, 'Speed', None)
+                    if speed:
+                        speeds.add(int(speed))
+                    man = self._safe_str(getattr(m, 'Manufacturer', None))
+                    pn = self._safe_str(getattr(m, 'PartNumber', None))
+                    rows.append((f"{man} {pn}", f"{self._bytes_to_gb(cap)}  @ {speed or '未知'} MHz"))
+                total_str = self._bytes_to_gb(total)
+                count = len(mems)
+                speed_str = (f"{max(speeds)}" if len(speeds)==1 else ("/".join(str(s) for s in sorted(speeds)) if speeds else "未知"))
+                rows.insert(0, ("总容量/条数", f"{total_str} / {count}"))
+                rows.insert(1, ("频率", f"{speed_str} MHz"))
+                self._add_card(self.hw_cards_frame, "内存", rows, accent='#06B6D4')
+        except Exception:
+            pass
+
+        # 硬盘
+        try:
+            disks = self.wmi.Win32_DiskDrive()
+            if disks:
+                rows = []
+                for d in disks:
+                    model = self._safe_str(getattr(d, 'Model', None))
+                    size = getattr(d, 'Size', None)
+                    size_str = self._bytes_to_gb(int(size)) if size else "未知"
+                    is_ssd = None
+                    try:
+                        media_type = getattr(d, 'MediaType', None)
+                        if media_type and isinstance(media_type, str):
+                            if 'ssd' in media_type.lower():
+                                is_ssd = True
+                            elif 'hard' in media_type.lower():
+                                is_ssd = False
+                    except Exception:
+                        pass
+                    if is_ssd is None:
+                        is_ssd = 'SSD' in model.upper()
+                    typ = 'SSD' if is_ssd else 'HDD'
+                    dtemp = self._pick_temp(temps, [model, 'HDD', 'SSD', 'Drive'])
+                    tail = f"容量 {size_str}  类型 {typ}"
+                    if dtemp is not None:
+                        tail += f"  温度 {dtemp:.0f}℃"
+                    dfan = self._pick_fan(fans, [model, 'HDD', 'Drive'])
+                    if dfan is not None:
+                        tail += f"  风扇 {dfan:.0f} RPM"
+                    rows.append((model, tail))
+                self._add_card(self.hw_cards_frame, "硬盘", rows, accent='#F59E0B')
+        except Exception:
+            pass
+
+        # 主板
+        try:
+            bbs = self.wmi.Win32_BaseBoard()
+            if bbs:
+                bb = bbs[0]
+                manu = self._safe_str(getattr(bb, 'Manufacturer', None))
+                prod = self._safe_str(getattr(bb, 'Product', None))
+                board_badge = self._temp_badge(self._pick_temp(temps, ["Mainboard", "Motherboard"]))
+                self._add_card(self.hw_cards_frame, "主板", [("制造商", manu), ("型号", prod)],
+                               title_icon=self._get_brand_icon('board', manu + ' ' + prod),
+                               badges=[board_badge] if board_badge else None,
+                               accent='#6366F1')
+        except Exception:
+            pass
+
+        # 显示器（放在主板后）
+        try:
+            width, height, refresh, diag_in = self._get_display_info()
+            rows = []
+            if width and height:
+                rows.append(("分辨率", f"{width} x {height}"))
+                rows.append(("刷新率", f"{refresh} Hz" if refresh else "未知"))
+                rows.append(("屏幕尺寸", f"{diag_in} 英寸" if diag_in else "未知"))
+            # 多显示器补充（名称/厂商/序列号/物理尺寸）
+            mons = self._get_monitors_detailed_info()
+            for idx, m in enumerate(mons, 1):
+                rows.append((f"显示器{idx}", m['name']))
+                rows.append(("厂商", m['manufacturer']))
+                if m.get('serial') and m['serial'] != 'Unknown':
+                    rows.append(("序列号", m['serial']))
+                if m.get('width_cm') and m.get('height_cm'):
+                    rows.append(("物理尺寸", f"{m['width_cm']} x {m['height_cm']} cm"))
+                if m.get('diag_inch'):
+                    rows.append(("对角线", f"{m['diag_inch']} 英寸"))
+            if rows:
+                self._add_card(self.hw_cards_frame, "显示器", rows, accent='#A855F7')
+        except Exception:
+            pass
+
+        # 系统信息
+        try:
+            os_name = platform.system()
+            release = platform.release()
+            version = platform.version()
+            build = platform.win32_ver()[1] if hasattr(platform, 'win32_ver') else ''
+            # 安装时间（WMI）
+            install_time = '未知'
+            try:
+                os_wmi = self.wmi.Win32_OperatingSystem()[0]
+                # Convert WMI datetime format yyyymmddHHMMSS.mmmmmmsUUU
+                raw = getattr(os_wmi, 'InstallDate', None)
+                if raw:
+                    from datetime import datetime
+                    install_time = datetime.strptime(raw.split('.')[0], '%Y%m%d%H%M%S').strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+            rows = [
+                ("系统版本", f"{os_name} {release} (Build {build})".strip()),
+                ("版本号", version),
+                ("安装时间", install_time),
+            ]
+            self._add_card(self.hw_cards_frame, "系统信息", rows, accent='#0EA5E9')
+        except Exception:
+            pass
+
+        self.status_var.set("硬件信息已刷新")
+        self._update_hw_scrollregion()
+
+    # ---- 硬件页实时刷新控制 ----
+    def _toggle_hw_live(self):
+        if self.hw_live_enabled_var.get():
+            self._schedule_hw_tick()
+        else:
+            self._cancel_hw_tick()
+
+    def _schedule_hw_tick(self):
+        self._cancel_hw_tick()
+        try:
+            interval_ms = max(1, int(self.hw_refresh_interval_var.get())) * 1000
+        except Exception:
+            interval_ms = 2000
+        self._hw_live_job_id = self.root.after(interval_ms, self._hw_tick)
+
+    def _cancel_hw_tick(self):
+        try:
+            if self._hw_live_job_id:
+                self.root.after_cancel(self._hw_live_job_id)
+        except Exception:
+            pass
+        self._hw_live_job_id = None
+
+    def _hw_tick(self):
+        try:
+            self.refresh_hardware_info()
+        finally:
+            if self.hw_live_enabled_var.get():
+                self._schedule_hw_tick()
+
+    def copy_all_hardware_info(self) -> None:
+        try:
+            # 遍历硬件卡片中的 Text 控件，拼接文本
+            texts = []
+            for child in self.hw_cards_frame.winfo_children():
+                try:
+                    inner = child.winfo_children()[1]  # [bar, inner]
+                    # 找到标题区域后的 Text
+                    for w in inner.winfo_children():
+                        if isinstance(w, tk.Text):
+                            w.configure(state=tk.NORMAL)
+                            texts.append(w.get('1.0', tk.END).rstrip())
+                            w.configure(state=tk.DISABLED)
+                            break
+                except Exception:
+                    pass
+            clip = "\n\n".join(texts)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(clip)
+            self.status_var.set("已复制全部硬件信息到剪贴板")
+        except Exception as e:
+            self.status_var.set(f"复制失败: {e}")
+
+    def _on_hw_tab_enter(self):
+        if self.hw_live_enabled_var.get():
+            self._schedule_hw_tick()
+
+    def _on_hw_tab_leave(self):
+        self._cancel_hw_tick()
         
     def add_extra_ip(self):
         """添加额外IP地址"""
@@ -989,8 +2118,16 @@ class IPManager:
             
         try:
             self.status_var.set("正在获取网络适配器...")
-            self.root.update()
+            # 使用after方法延迟更新，避免阻塞UI
+            self.root.after(10, self._do_refresh_network_adapters)
             
+        except Exception as e:
+            self.status_var.set(f"错误: {str(e)}")
+            messagebox.showerror("错误", f"获取网络适配器时出错:\n{str(e)}")
+    
+    def _do_refresh_network_adapters(self):
+        """实际执行网络适配器刷新（在后台线程中）"""
+        try:
             adapters = []
             self.adapter_map = {}
             self.wmi_adapters = {}
@@ -1030,6 +2167,15 @@ class IPManager:
                     # 同时保存到映射中，用于兼容性
                     self.adapter_map[adapter_name] = adapter_name
             
+            # 在主线程中更新UI
+            self.root.after(0, lambda: self._update_adapter_ui(adapters))
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_adapter_error(str(e)))
+    
+    def _update_adapter_ui(self, adapters):
+        """在主线程中更新适配器UI"""
+        try:
             # 更新下拉列表
             self.adapter_combo['values'] = adapters
             
@@ -1046,8 +2192,12 @@ class IPManager:
             self.status_var.set(f"找到 {len(adapters)} 个网络适配器")
             
         except Exception as e:
-            self.status_var.set(f"错误: {str(e)}")
-            messagebox.showerror("错误", f"获取网络适配器时出错:\n{str(e)}")
+            self.status_var.set(f"更新UI失败: {str(e)}")
+    
+    def _handle_adapter_error(self, error_msg):
+        """处理适配器错误"""
+        self.status_var.set(f"错误: {error_msg}")
+        messagebox.showerror("错误", f"获取网络适配器时出错:\n{error_msg}")
     
     def on_adapter_selected(self, event=None):
         """当选择网络适配器时"""
@@ -1057,8 +2207,15 @@ class IPManager:
             
         try:
             self.status_var.set("正在获取IP信息...")
-            self.root.update()
+            # 使用after方法延迟更新，避免阻塞UI
+            self.root.after(10, lambda: self._do_get_adapter_info(adapter_name))
             
+        except Exception as e:
+            self.status_var.set(f"错误: {str(e)}")
+    
+    def _do_get_adapter_info(self, adapter_name):
+        """实际获取适配器信息（在后台线程中）"""
+        try:
             # 重新获取网卡对象，确保状态是最新的
             network_adapters = self.wmi.Win32_NetworkAdapter(Name=adapter_name)
             if len(network_adapters) > 0:
@@ -1068,7 +2225,7 @@ class IPManager:
             else:
                 adapter = self.network_adapters.get(adapter_name)
                 if not adapter:
-                    self.status_var.set("未找到适配器信息")
+                    self.root.after(0, lambda: self.status_var.set("未找到适配器信息"))
                     return
                 
             # 重新获取网卡配置信息
@@ -1080,6 +2237,15 @@ class IPManager:
             else:
                 nic = self.wmi_adapters.get(adapter_name)
             
+            # 在主线程中更新UI
+            self.root.after(0, lambda: self._update_adapter_info(adapter, nic))
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_adapter_info_error(str(e)))
+    
+    def _update_adapter_info(self, adapter, nic):
+        """在主线程中更新适配器信息UI"""
+        try:
             if nic:
                 self.display_wmi_ip_info(nic, adapter)
                 self.status_var.set("IP信息已更新")
@@ -1098,6 +2264,98 @@ class IPManager:
             self.status_var.set(f"错误: {str(e)}")
             messagebox.showerror("错误", f"获取IP信息时出错:\n{str(e)}")
     
+    def _handle_adapter_info_error(self, error_msg):
+        """处理适配器信息错误"""
+        self.status_var.set(f"获取适配器信息失败: {error_msg}")
+    
+    def _get_adapter_status(self, adapter, nic=None):
+        """获取适配器的详细状态"""
+        try:
+            # 检查适配器的多个状态属性
+            net_enabled = getattr(adapter, 'NetEnabled', None)
+            net_connection_status = getattr(adapter, 'NetConnectionStatus', None)
+            adapter_enabled = getattr(adapter, 'AdapterEnabled', None)
+            
+            # 调试信息（可选）
+            # print(f"调试 - {adapter.Name}: NetEnabled={net_enabled}, NetConnectionStatus={net_connection_status}, AdapterEnabled={adapter_enabled}")
+            
+            # 首先检查是否被禁用（但需要特殊处理NetConnectionStatus=7的情况）
+            if adapter_enabled is False:
+                return "已禁用"
+            
+            # 对于NetEnabled=False的情况，需要结合NetConnectionStatus判断
+            if net_enabled is False:
+                # 如果NetConnectionStatus=7（媒体断开连接），则显示未连接而不是禁用
+                if net_connection_status == 7:
+                    return "未连接"
+                # 如果NetConnectionStatus=4或5（硬件不存在或被禁用），则显示禁用
+                elif net_connection_status in [4, 5]:
+                    return "已禁用"
+                # 其他情况显示禁用
+                else:
+                    return "已禁用"
+            
+            # 如果NetEnabled为None，可能是虚拟适配器，检查其他属性
+            if net_enabled is None:
+                if adapter_enabled is False:
+                    return "已禁用"
+                elif adapter_enabled is True:
+                    # 虚拟适配器，检查是否有IP地址
+                    if nic and hasattr(nic, 'IPAddress') and nic.IPAddress and len(nic.IPAddress) > 0:
+                        return "已连接"
+                    else:
+                        return "未连接"
+                else:
+                    return "未知状态"
+            
+            # 检查连接状态
+            if net_connection_status is not None:
+                # NetConnectionStatus 值含义：
+                # 0 = 断开连接
+                # 1 = 连接中
+                # 2 = 已连接
+                # 3 = 断开连接中
+                # 4 = 硬件不存在
+                # 5 = 硬件被禁用
+                # 6 = 硬件故障
+                # 7 = 媒体断开连接
+                # 8 = 正在验证
+                # 9 = 验证失败
+                # 10 = 连接失败
+                # 11 = 断开连接中
+                # 12 = 已断开连接
+                
+                # 优先根据NetConnectionStatus判断状态
+                if net_connection_status == 7:
+                    return "未连接"  # 媒体断开连接
+                elif net_connection_status in [0, 3, 11, 12]:
+                    return "未连接"  # 其他断开状态
+                elif net_connection_status in [1, 8]:
+                    return "连接中"
+                elif net_connection_status == 2:
+                    return "已连接"
+                elif net_connection_status in [4, 5]:
+                    return "已禁用"
+                elif net_connection_status in [6, 9, 10]:
+                    return "连接失败"
+                else:
+                    return f"状态{net_connection_status}"
+            
+            # 如果NetConnectionStatus不可用，回退到IP地址检查
+            if nic and hasattr(nic, 'IPAddress') and nic.IPAddress and len(nic.IPAddress) > 0:
+                # 检查是否有有效的IPv4地址
+                for ip in nic.IPAddress:
+                    if re.match(r'^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$', ip):
+                        return "已连接"
+                return "已启用(仅IPv6)"
+            else:
+                return "未连接"
+                
+        except Exception as e:
+            # 如果出现异常，回退到基本状态
+            print(f"获取适配器状态时出错: {e}")
+            return "已启用" if getattr(adapter, 'NetEnabled', False) else "已禁用"
+    
     def display_adapter_info(self, adapter):
         """显示网卡基本信息（用于禁用状态）"""
         self.ip_info_text.config(state=tk.NORMAL)
@@ -1107,7 +2365,19 @@ class IPManager:
         info_lines = []
         info_lines.append(f"适配器名称: {adapter.Name}")
         info_lines.append(f"MAC地址: {adapter.MACAddress if adapter.MACAddress else '未知'}")
-        info_lines.append(f"适配器状态: {'已启用' if adapter.NetEnabled else '已禁用'}")
+        
+        # 尝试获取配置信息以确定准确状态
+        nic = None
+        try:
+            nic_configs = self.wmi.Win32_NetworkAdapterConfiguration(Index=adapter.Index)
+            if len(nic_configs) > 0:
+                nic = nic_configs[0]
+        except Exception:
+            pass
+        
+        # 使用新的状态判断方法
+        status = self._get_adapter_status(adapter, nic)
+        info_lines.append(f"适配器状态: {status}")
         
         # 尝试获取静态IP配置（即使网卡未连接）
         try:
@@ -1167,14 +2437,31 @@ class IPManager:
             
         try:
             self.status_var.set("正在刷新IP信息...")
-            self.root.update()
+            # 使用after方法延迟更新，避免阻塞UI
+            self.root.after(10, lambda: self._do_refresh_ip_info(adapter_name))
             
+        except Exception as e:
+            self.status_var.set(f"错误: {str(e)}")
+    
+    def _do_refresh_ip_info(self, adapter_name):
+        """实际执行IP信息刷新（在后台线程中）"""
+        try:
             adapter = self.network_adapters.get(adapter_name)
             if not adapter:
-                self.status_var.set("未找到适配器信息")
+                self.root.after(0, lambda: self.status_var.set("未找到适配器信息"))
                 return
                 
             nic = self.wmi_adapters.get(adapter_name)
+            
+            # 在主线程中更新UI
+            self.root.after(0, lambda: self._update_ip_info_ui(adapter, nic))
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_refresh_ip_error(str(e)))
+    
+    def _update_ip_info_ui(self, adapter, nic):
+        """在主线程中更新IP信息UI"""
+        try:
             if nic:
                 self.display_wmi_ip_info(nic, adapter)
                 self.status_var.set("IP信息已刷新")
@@ -1184,8 +2471,12 @@ class IPManager:
                 self.status_var.set("仅显示基本网卡信息")
                 
         except Exception as e:
-            self.status_var.set(f"错误: {str(e)}")
-            messagebox.showerror("错误", f"刷新IP信息时出错:\n{str(e)}")
+            self.status_var.set(f"更新IP信息失败: {str(e)}")
+    
+    def _handle_refresh_ip_error(self, error_msg):
+        """处理刷新IP信息错误"""
+        self.status_var.set(f"刷新IP信息失败: {error_msg}")
+        messagebox.showerror("错误", f"刷新IP信息时出错:\n{error_msg}")
     
     def display_wmi_ip_info(self, nic, adapter):
         """显示WMI获取的IP信息"""
@@ -1199,7 +2490,10 @@ class IPManager:
         info_lines = []
         info_lines.append(f"适配器名称: {adapter.Name}")
         info_lines.append(f"MAC地址: {adapter.MACAddress if adapter.MACAddress else '未知'}")
-        info_lines.append(f"适配器状态: {'已启用' if adapter.NetEnabled else '已禁用'}")
+        
+        # 使用新的状态判断方法
+        status = self._get_adapter_status(adapter, nic)
+        info_lines.append(f"适配器状态: {status}")
         
         # IP地址信息
         if hasattr(nic, 'IPAddress') and nic.IPAddress and len(nic.IPAddress) > 0:
@@ -1843,8 +3137,9 @@ class IPManager:
                 messagebox.showerror("错误", "未找到网卡对象")
                 return
             
-            # 检查网卡是否已经禁用
-            if not adapter.NetEnabled:
+            # 检查网卡是否已经禁用（使用新的状态判断逻辑）
+            current_status = self._get_adapter_status(adapter)
+            if current_status == "已禁用":
                 messagebox.showinfo("提示", f"网卡 '{adapter_name}' 已经处于禁用状态")
                 self.status_var.set("网卡已禁用")
                 return
@@ -1886,8 +3181,9 @@ class IPManager:
                 messagebox.showerror("错误", "未找到网卡对象")
                 return
             
-            # 检查网卡是否已经启用
-            if adapter.NetEnabled:
+            # 检查网卡是否已经启用（使用新的状态判断逻辑）
+            current_status = self._get_adapter_status(adapter)
+            if current_status in ["已连接", "未连接", "连接中", "已启用(仅IPv6)"]:
                 messagebox.showinfo("提示", f"网卡 '{adapter_name}' 已经处于启用状态")
                 self.status_var.set("网卡已启用")
                 return
@@ -2035,6 +3331,429 @@ class IPManager:
             messagebox.showerror("错误", f"重置网络时出错:\n{str(e)}")
             self.status_var.set(f"错误: {str(e)}")
 
+    def _on_window_resize(self, event):
+        # 更新缩放因子
+        self._update_scale_factor()
+
+    def _update_scale_factor(self):
+        # 获取当前窗口大小
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        
+        # 计算缩放因子
+        new_scale_factor = min(width / self.base_width, height / self.base_height)
+        
+        # 只有当缩放因子真正改变时才更新
+        if abs(new_scale_factor - self.scale_factor) > 0.01:
+            self.scale_factor = new_scale_factor
+            # 应用缩放到所有UI元素
+            self._apply_scaling()
+    
+    def _get_scaled_font(self, base_size, weight='normal', family='Segoe UI'):
+        """获取缩放后的字体"""
+        scaled_size = max(int(base_size * self.scale_factor), 8)  # 最小字体大小为8
+        return (family, scaled_size, weight)
+    
+    def _get_scaled_width(self, base_width):
+        """获取缩放后的宽度"""
+        return max(int(base_width * self.scale_factor), 1)
+    
+    def _get_scaled_height(self, base_height):
+        """获取缩放后的高度"""
+        return max(int(base_height * self.scale_factor), 1)
+    
+    def _get_scaled_padding(self, base_padding):
+        """获取缩放后的内边距"""
+        if isinstance(base_padding, (tuple, list)):
+            return tuple(max(int(p * self.scale_factor), 0) for p in base_padding)
+        else:
+            return max(int(base_padding * self.scale_factor), 0)
+    
+    def _register_scalable_widget(self, widget, widget_type, **kwargs):
+        """注册需要缩放的UI元素"""
+        self.scalable_widgets.append({
+            'widget': widget,
+            'type': widget_type,
+            'params': kwargs
+        })
+    
+    def _apply_scaling(self):
+        """应用缩放到所有UI元素"""
+        try:
+            # 更新所有注册的UI元素
+            for item in self.scalable_widgets:
+                widget = item['widget']
+                widget_type = item['type']
+                params = item['params']
+                
+                if widget_type == 'label':
+                    if 'font' in params:
+                        widget.configure(font=self._get_scaled_font(*params['font']))
+                elif widget_type == 'entry':
+                    if 'width' in params:
+                        widget.configure(width=self._get_scaled_width(params['width']))
+                    if 'font' in params:
+                        widget.configure(font=self._get_scaled_font(*params['font']))
+                elif widget_type == 'button':
+                    if 'width' in params:
+                        widget.configure(width=self._get_scaled_width(params['width']))
+                    if 'font' in params:
+                        widget.configure(font=self._get_scaled_font(*params['font']))
+                elif widget_type == 'text':
+                    if 'width' in params:
+                        widget.configure(width=self._get_scaled_width(params['width']))
+                    if 'height' in params:
+                        widget.configure(height=self._get_scaled_height(params['height']))
+                    if 'font' in params:
+                        widget.configure(font=self._get_scaled_font(*params['font']))
+                elif widget_type == 'combobox':
+                    if 'width' in params:
+                        widget.configure(width=self._get_scaled_width(params['width']))
+                    if 'font' in params:
+                        widget.configure(font=self._get_scaled_font(*params['font']))
+            
+            # 更新样式配置
+            self._update_styles()
+            
+        except Exception as e:
+            print(f"应用缩放时出错: {e}")
+    
+    def _update_styles(self):
+        """更新所有样式配置"""
+        try:
+            style = ttk.Style()
+            
+            # 更新选项卡标题样式 - 确保文字居中
+            style.configure('TNotebook.Tab', 
+                          padding=self._get_scaled_padding((12, 6)),
+                          font=self._get_scaled_font(11),
+                          anchor='center',  # 设置文字居中对齐
+                          justify='center')  # 设置文本居中对齐
+            
+            # 针对Windows系统的额外样式设置
+            style.map('TNotebook.Tab',
+                     background=[('selected', '#E3F2FD'), ('active', '#F5F5F5')],
+                     foreground=[('selected', '#1976D2'), ('active', '#424242')])
+            
+            # 更新卡片样式
+            style.configure('CardTitle.TLabel', 
+                          font=self._get_scaled_font(13, 'bold'), 
+                          foreground='#0F172A', 
+                          background='#FFFFFF')
+            style.configure('CardItemLeft.TLabel', 
+                          font=self._get_scaled_font(10),
+                          foreground='#6B7280', 
+                          background='#FFFFFF')
+            style.configure('CardItemRight.TLabel', 
+                          font=self._get_scaled_font(10),
+                          foreground='#0F172A', 
+                          background='#FFFFFF')
+            style.configure('CardValue.TLabel', 
+                          font=self._get_scaled_font(11, family='Consolas'), 
+                          foreground='#111827', 
+                          background='#FFFFFF')
+            
+            # 更新按钮样式
+            button_padding = self._get_scaled_padding((10, 6))
+            style.configure('Segment.TButton', 
+                          padding=button_padding, 
+                          relief='flat',
+                          background='#1F2937', 
+                          foreground='#E5E7EB')
+            style.configure('SegmentSelected.TButton', 
+                          padding=button_padding, 
+                          relief='flat',
+                          background=ACCENT, 
+                          foreground='#0B1221')
+            
+        except Exception as e:
+            print(f"更新样式时出错: {e}")
+    
+    def _bind_hw_tab_events(self):
+        """绑定硬件信息页签切换事件"""
+        try:
+            # 获取notebook和硬件信息页签
+            notebook = None
+            for widget in self.root.winfo_children():
+                if isinstance(widget, ttk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, ttk.Notebook):
+                            notebook = child
+                            break
+                    if notebook:
+                        break
+            
+            if notebook:
+                # 绑定页签切换事件
+                notebook.bind('<<NotebookTabChanged>>', self._on_notebook_tab_changed)
+        except Exception as e:
+            print(f"绑定硬件信息页签事件失败: {e}")
+    
+    def _on_notebook_tab_changed(self, event):
+        """处理页签切换事件"""
+        try:
+            notebook = event.widget
+            current_tab = notebook.select()
+            tab_id = notebook.index(current_tab)
+            
+            # 检查是否是硬件信息页签（通常是第5个页签，索引为4）
+            if tab_id == 4:  # 硬件信息页签
+                self._on_hw_tab_enter()
+            else:
+                self._on_hw_tab_leave()
+        except Exception as e:
+            print(f"处理页签切换事件失败: {e}")
+    
+    def _ensure_taskbar_icon(self):
+        """确保任务栏图标正确显示"""
+        try:
+            # 强制更新窗口图标
+            self.root.update_idletasks()
+            
+            # 确保窗口有正确的图标
+            if hasattr(self, '_icon_img') and self._icon_img:
+                self.root.iconphoto(True, self._icon_img)
+                print("任务栏图标已确保设置")
+            
+            # 设置窗口类图标（关键修复）
+            try:
+                import ctypes
+                hwnd = self.root.winfo_id()
+                ico_path = resource_path("ip_manager.ico")
+                
+                if os.path.exists(ico_path):
+                    # 加载图标
+                    icon_handle = ctypes.windll.user32.LoadImageW(
+                        None, ico_path, 1, 0, 0, 0x00000010  # IMAGE_ICON, LR_LOADFROMFILE
+                    )
+                    
+                    if icon_handle:
+                        # 设置窗口图标
+                        ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, icon_handle)  # WM_SETICON, ICON_SMALL
+                        ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, icon_handle)  # WM_SETICON, ICON_BIG
+                        
+                        # 设置类图标
+                        ctypes.windll.user32.SetClassLongW(hwnd, -14, icon_handle)  # GCL_HICONSM
+                        ctypes.windll.user32.SetClassLongW(hwnd, -15, icon_handle)  # GCL_HICON
+                        
+                        # 强制重绘窗口
+                        ctypes.windll.user32.InvalidateRect(hwnd, None, True)
+                        ctypes.windll.user32.UpdateWindow(hwnd)
+                        
+                        print("✓ 窗口类图标设置成功")
+                        
+                        # 延迟后再次设置，确保生效
+                        self.root.after(1000, self._force_set_icon_again)
+            except Exception as e:
+                print(f"设置窗口类图标失败: {e}")
+            
+            # 在Windows上，有时需要强制刷新任务栏
+            try:
+                import ctypes
+                ctypes.windll.user32.SetWindowPos(
+                    self.root.winfo_id(), 0, 0, 0, 0, 0,
+                    0x0001 | 0x0002 | 0x0004  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER
+                )
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f"确保任务栏图标失败: {e}")
+    
+    def _force_set_icon_again(self):
+        """延迟后再次强制设置图标"""
+        try:
+            import ctypes
+            hwnd = self.root.winfo_id()
+            ico_path = resource_path("ip_manager.ico")
+            
+            if os.path.exists(ico_path):
+                # 加载图标
+                icon_handle = ctypes.windll.user32.LoadImageW(
+                    None, ico_path, 1, 0, 0, 0x00000010  # IMAGE_ICON, LR_LOADFROMFILE
+                )
+                
+                if icon_handle:
+                    # 再次设置窗口图标
+                    ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, icon_handle)  # WM_SETICON, ICON_SMALL
+                    ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, icon_handle)  # WM_SETICON, ICON_BIG
+                    
+                    # 再次设置类图标
+                    ctypes.windll.user32.SetClassLongW(hwnd, -14, icon_handle)  # GCL_HICONSM
+                    ctypes.windll.user32.SetClassLongW(hwnd, -15, icon_handle)  # GCL_HICON
+                    
+                    # 强制重绘
+                    ctypes.windll.user32.InvalidateRect(hwnd, None, True)
+                    ctypes.windll.user32.UpdateWindow(hwnd)
+                    
+                    print("✓ 延迟图标设置成功")
+        except Exception as e:
+            print(f"延迟图标设置失败: {e}")
+
+    def _init_system_tray(self):
+        """初始化系统托盘"""
+        if not SYSTEM_TRAY_AVAILABLE:
+            return
+            
+        try:
+            # 创建托盘图标
+            icon_image = self._create_tray_icon()
+            
+            # 创建托盘菜单
+            menu = pystray.Menu(
+                pystray.MenuItem("显示主窗口", self._show_window),
+                pystray.MenuItem("退出", self._quit_application)
+            )
+            
+            # 创建托盘图标，设置单击事件
+            self.tray_icon = pystray.Icon(
+                "ip_manager",
+                icon_image,
+                "Windows IP地址管理器",
+                menu
+            )
+            
+            # 设置单击托盘图标显示窗口
+            self.tray_icon.on_click = self._on_tray_click
+            
+        except Exception as e:
+            print(f"初始化系统托盘失败: {e}")
+    
+    def _create_tray_icon(self):
+        """创建托盘图标"""
+        try:
+            # 优先使用ico文件
+            ico_path = resource_path("ip_manager.ico")
+            if os.path.exists(ico_path):
+                return Image.open(ico_path)
+        except Exception:
+            pass
+            
+        try:
+            # 备用ico文件名
+            for ico_name in ["IP管理器.ico", "icon.ico", "app.ico"]:
+                ico_path = resource_path(ico_name)
+                if os.path.exists(ico_path):
+                    return Image.open(ico_path)
+        except Exception:
+            pass
+            
+        try:
+            # 使用PNG文件
+            png_path = resource_path("ip_manager_256x256.png")
+            if os.path.exists(png_path):
+                return Image.open(png_path)
+        except Exception:
+            pass
+        
+        # 如果图标文件不存在，创建一个简单的图标
+        return self._create_default_tray_icon()
+    
+    def _create_default_tray_icon(self):
+        """创建默认托盘图标"""
+        # 创建一个16x16的图标
+        image = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        
+        # 绘制一个简单的图标
+        draw.rectangle([2, 2, 13, 13], fill=(0, 132, 255, 255), outline=(255, 255, 255, 255))
+        draw.text((4, 4), "IP", fill=(255, 255, 255, 255))
+        
+        return image
+    
+    def _on_closing(self):
+        """处理窗口关闭事件"""
+        if self.is_minimized_to_tray:
+            # 如果已经最小化到托盘，则真正退出
+            self._quit_application()
+        else:
+            # 第一次关闭时询问用户
+            if not self.first_close_asked:
+                self.first_close_asked = True
+                result = messagebox.askyesnocancel(
+                    "关闭确认", 
+                    "您想要关闭程序还是最小化到系统托盘？\n\n选择：\n• 是(Y) - 最小化到系统托盘\n• 否(N) - 关闭程序\n• 取消 - 返回程序",
+                    icon=messagebox.QUESTION
+                )
+                
+                if result is True:  # 用户选择"是" - 最小化到托盘
+                    self._minimize_to_tray()
+                elif result is False:  # 用户选择"否" - 关闭程序
+                    self._quit_application()
+                else:  # 用户选择"取消" - 返回程序
+                    return
+            else:
+                # 不是第一次关闭，直接最小化到托盘
+                self._minimize_to_tray()
+    
+    def _on_tray_click(self, icon, event):
+        """托盘图标单击事件"""
+        try:
+            if self.is_minimized_to_tray:
+                self._show_window()
+        except Exception as e:
+            print(f"托盘单击事件处理失败: {e}")
+    
+    def _minimize_to_tray(self):
+        """最小化到系统托盘"""
+        if not SYSTEM_TRAY_AVAILABLE or not self.tray_icon:
+            return
+            
+        try:
+            # 隐藏主窗口
+            self.root.withdraw()
+            self.is_minimized_to_tray = True
+            
+            # 启动托盘图标（如果还没有启动）
+            if not self.tray_icon.visible:
+                threading.Thread(target=self._run_tray_icon, daemon=True).start()
+                
+        except Exception as e:
+            print(f"最小化到托盘失败: {e}")
+    
+    def _run_tray_icon(self):
+        """在后台线程中运行托盘图标"""
+        try:
+            if self.tray_icon and not self.tray_icon.visible:
+                self.tray_icon.run()
+        except Exception as e:
+            print(f"运行托盘图标失败: {e}")
+    
+    def _show_window(self, icon=None, item=None):
+        """显示主窗口"""
+        try:
+            # 显示主窗口
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.is_minimized_to_tray = False
+            
+            # 确保任务栏图标重新显示
+            self._ensure_taskbar_icon()
+            
+            # 注意：不要停止托盘图标，只是隐藏窗口
+            # 托盘图标会继续在后台运行，等待下次最小化
+                
+        except Exception as e:
+            print(f"显示窗口失败: {e}")
+    
+    def _quit_application(self, icon=None, item=None):
+        """退出应用程序"""
+        try:
+            # 停止托盘图标
+            if self.tray_icon and self.tray_icon.visible:
+                self.tray_icon.stop()
+            
+            # 取消硬件信息定时器
+            self._cancel_hw_tick()
+            
+            # 销毁主窗口
+            self.root.quit()
+            self.root.destroy()
+            
+        except Exception as e:
+            print(f"退出应用程序失败: {e}")
+
 def is_admin():
     """检查是否具有管理员权限"""
     try:
@@ -2120,11 +3839,7 @@ def main():
         pass
     app = IPManager(root)
     
-    # 设置窗口图标（如果有的话）
-    try:
-        root.iconbitmap('icon.ico')
-    except:
-        pass
+    # 图标已在IPManager.__init__()中设置，这里不需要重复设置
     
     root.mainloop()
 

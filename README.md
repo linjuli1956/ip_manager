@@ -63,6 +63,32 @@ pyinstaller --onefile --windowed --name="IP管理器" main.py
 
 ## 版本历史
 
+### v2.0.1 (2025-08-11)
+- 新增系统托盘功能：点击右上角X最小化到任务栏，支持单击托盘图标显示窗口
+- 优化网络适配器状态显示：准确区分"已禁用"、"未连接"、"已连接"、"连接中"等状态
+- 修复网络适配器状态判断逻辑，使用NetConnectionStatus属性进行精确状态判断
+- 更新网卡控制功能，使用统一的状态判断逻辑
+- 优化UI显示，修复获取网络信息时的界面布局问题
+- 默认窗口大小调整为 820×750，提供更好的显示体验
+
+### v2.1.1 (2025-08-11)
+- 新增风扇转速渐变显示功能：为CPU和GPU风扇转速添加颜色渐变徽章
+- 风扇转速颜色规则：<800 RPM(绿色)、800-1500 RPM(黄色)、1500-2500 RPM(橙色)、>2500 RPM(红色)
+- 优化硬件信息显示：CPU和GPU卡片现在同时显示温度和风扇转速徽章
+- 完善LibreHardwareMonitor集成：修复风扇传感器识别问题，支持更多风扇传感器名称匹配
+
+### v2.1.0 (2025-08-11)
+- 修复Windows任务栏图标显示问题：解决添加系统托盘功能后任务栏图标不显示的问题
+- 优化图标设置机制：统一使用ip_manager.ico作为主要图标文件，添加窗口类图标设置
+- 改进系统托盘功能：确保托盘图标和任务栏图标都能正确显示
+
+### v2.0.0 (2025-08-09)
+- 新增"硬件信息"子界面（CPU/显卡/内存/硬盘/主板/显示器/系统信息），支持温度与风扇转速
+- 集成 LibreHardwareMonitor（DLL/WMI），支持实时刷新与刷新间隔
+- 新增"复制信息"按钮，一键复制所有硬件信息
+- UI 现代化浅色主题，按钮与分段样式重构，标题置中
+- 默认窗口大小 600×453（进一步优化1920×1080显示器适配）
+
 ### v1.3.1 (2025-08-08)
 - 完善IP地址验证功能
 - 实时验证IP地址、子网掩码、网关、DNS
@@ -79,18 +105,33 @@ pyinstaller --onefile --windowed --name="IP管理器" main.py
 - 支持Windows IP地址管理
 - 支持网络适配器控制
 
+## 第三方库
+
+### LibreHardwareMonitor
+本项目集成了 [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) 用于硬件监控功能。
+
+- **许可证**: Mozilla Public License Version 2.0 (MPL 2.0)
+- **功能**: 监控CPU/GPU温度、风扇转速、电压、负载和时钟速度
+- **集成方式**: 通过pythonnet直接调用DLL，支持WMI接口
+- **许可证文件**: 见 `LibreHardwareMonitor/LICENSE`
+
+LibreHardwareMonitor是OpenHardwareMonitor的一个活跃维护的分支，提供更好的硬件支持和更新的功能。
+
 ## 文件结构
 
 ```
 ip_manager/
-├── main.py              # 主程序源码
-├── version.py           # 版本信息管理
-├── build_exe.py         # 构建脚本
-├── build.bat            # 批处理构建脚本
-├── CHANGELOG.md         # 更新日志
-├── 更新说明.txt          # 用户更新说明
-├── README.md            # 项目说明
-└── .gitignore           # Git忽略文件
+├── main.py                          # 主程序文件
+├── version.py                       # 版本信息
+├── build.bat                        # 构建脚本
+├── IP管理器_v2.1.1.exe              # 可执行文件
+├── LibreHardwareMonitor/            # 硬件监控库
+│   ├── LibreHardwareMonitorLib.dll  # 核心库文件
+│   ├── LibreHardwareMonitor.exe     # WMI服务程序
+│   ├── LICENSE                      # MPL 2.0许可证
+│   └── README.md                    # 库说明文件
+├── 图标文件/                        # 应用图标
+└── 文档文件/                        # 更新说明和发布日志
 ```
 
 ## 开发说明
@@ -127,5 +168,5 @@ ip_manager/
 
 ---
 
-**最后更新**: 2025-08-08  
-**当前版本**: v1.3.1 
+**最后更新**: 2025-08-11  
+**当前版本**: v2.1.1 
